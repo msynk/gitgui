@@ -8,6 +8,10 @@ pub struct Settings {
     pub inline_diff: bool,
     pub compact_diff: bool,
     pub sidebar_w: i32,
+    /// Activity bar and side bar on the right edge (VS Code "Toggle Primary Side Bar Position").
+    pub sidebar_right: bool,
+    /// Show the Changes list as a folder tree (VS Code "View as Tree").
+    pub tree_view: bool,
     pub graph_split: f32,
     pub output_h: i32,
     pub output_visible: bool,
@@ -27,6 +31,8 @@ impl Default for Settings {
             inline_diff: false,
             compact_diff: false,
             sidebar_w: 320,
+            sidebar_right: false,
+            tree_view: false,
             graph_split: 0.55,
             output_h: 180,
             output_visible: false,
@@ -58,6 +64,8 @@ impl Settings {
                 "inline_diff" => s.inline_diff = b,
                 "compact_diff" => s.compact_diff = b,
                 "sidebar_w" => s.sidebar_w = v.parse().unwrap_or(320).clamp(180, 2000),
+                "sidebar_right" => s.sidebar_right = b,
+                "tree_view" => s.tree_view = b,
                 "graph_split" => s.graph_split = v.parse().unwrap_or(0.55f32).clamp(0.1, 0.9),
                 "output_h" => s.output_h = v.parse().unwrap_or(180).clamp(60, 2000),
                 "output_visible" => s.output_visible = b,
@@ -90,6 +98,8 @@ impl Settings {
         out += &format!("inline_diff={}\n", b(self.inline_diff));
         out += &format!("compact_diff={}\n", b(self.compact_diff));
         out += &format!("sidebar_w={}\n", self.sidebar_w);
+        out += &format!("sidebar_right={}\n", b(self.sidebar_right));
+        out += &format!("tree_view={}\n", b(self.tree_view));
         out += &format!("graph_split={}\n", self.graph_split);
         out += &format!("output_h={}\n", self.output_h);
         out += &format!("output_visible={}\n", b(self.output_visible));

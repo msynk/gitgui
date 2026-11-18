@@ -38,6 +38,8 @@ const I_DOC: char = '\u{E8A5}';
 const I_SC: char = '\u{E8D4}';
 const I_SEARCH: char = '\u{E721}';
 const I_FOLDER: char = '\u{E8B7}';
+/// Indent per tree level in the Changes view (unscaled pixels).
+const TREE_INDENT: i32 = 12;
 const I_TAG: char = '\u{E8EC}';
 
 pub struct Menu {
@@ -105,32 +107,36 @@ impl App {
         let sb = self.s(22);
         let ab = self.s(48);
         let sw = self.s(self.st.sidebar_w).clamp(self.s(180), (w - ab - self.s(260)).max(self.s(180)));
+        let right = self.st.sidebar_right;
+        // activity bar on the outer edge, side bar next to it, main area takes the rest
+        let ax = if right { w - ab } else { 0 };
+        let sx = if right { w - ab - sw } else { ab };
         let mut l = Layout::default();
         l.status = rect(0, h - sb, w, h);
-        l.activity = rect(0, 0, ab, h - sb);
-        l.sidebar = rect(ab, 0, ab + sw, h - sb);
-        l.title = rect(ab, 0, ab + sw, self.s(35));
+        l.activity = rect(ax, 0, ax + ab, h - sb);
+        l.sidebar = rect(sx, 0, sx + sw, h - sb);
+        l.title = rect(sx, 0, sx + sw, self.s(35));
         // sidebar sections
         let avail_top = l.title.bottom;
         let avail_h = l.sidebar.bottom - avail_top;
         let split = avail_top + ((avail_h as f32) * self.st.graph_split) as i32;
         let split = split.clamp(avail_top + self.s(150), (l.sidebar.bottom - self.s(80)).max(avail_top + self.s(150)));
-        l.changes_header = rect(ab, avail_top, ab + sw, avail_top + self.s(22));
+        l.changes_header = rect(sx, avail_top, sx + sw, avail_top + self.s(22));
         let edit_h = self.edit_lines * self.s(18) + self.s(8);
-        l.edit = rect(ab + self.s(20), l.changes_header.bottom + self.s(4), ab + sw - self.s(12), l.changes_header.bottom + self.s(4) + edit_h);
+        l.edit = rect(sx + self.s(20), l.changes_header.bottom + self.s(4), sx + sw - self.s(12), l.changes_header.bottom + self.s(4) + edit_h);
         let has_button = self.repo.is_some();
         l.button = if has_button { rect(l.edit.left, l.edit.bottom + self.s(6), l.edit.right, l.edit.bottom + self.s(6) + self.s(28)) } else { rect(l.edit.left, l.edit.bottom, l.edit.right, l.edit.bottom) };
-        l.changes = rect(ab, l.button.bottom + self.s(6), ab + sw, split);
-        l.graph_header = rect(ab, split, ab + sw, split + self.s(22));
-        l.graph = rect(ab, l.graph_header.bottom, ab + sw, l.sidebar.bottom);
-        // main
-        let mx = l.sidebar.right + 1;
+        l.changes = rect(sx, l.button.bottom + self.s(6), sx + sw, split);
+        l.graph_header = rect(sx, split, sx + sw, split + self.s(22));
+        l.graph = rect(sx, l.graph_header.bottom, sx + sw, l.sidebar.bottom);
+        // main area, with a 1px border between it and the side bar
+        let (mx, mr) = if right { (0, l.sidebar.left - 1) } else { (l.sidebar.right + 1, w) };
         let out_h = if self.st.output_visible { self.s(self.st.output_h).clamp(self.s(80), (h - sb - self.s(150)).max(self.s(80))) } else { 0 };
-        l.main = rect(mx, 0, w, h - sb - out_h);
-        l.main_header = rect(mx, 0, w, self.s(35));
-        l.main_body = rect(mx, l.main_header.bottom, w, l.main.bottom);
-        l.output = rect(mx, l.main.bottom, w, h - sb);
-        l.output_body = rect(mx, l.output.top + self.s(35), w, l.output.bottom);
+        l.main = rect(mx, 0, mr, h - sb - out_h);
+        l.main_header = rect(mx, 0, mr, self.s(35));
+        l.main_body = rect(mx, l.main_header.bottom, mr, l.main.bottom);
+        l.output = rect(mx, l.main.bottom, mr, h - sb);
+        l.output_body = rect(mx, l.output.top + self.s(35), mr, l.output.bottom);
         self.l = l;
         unsafe {
             let show = self.repo.is_some();
@@ -316,6 +322,39 @@ impl App {
         unsafe {
             BitBlt(hdc, 0, 0, w, h, self.buf.0, 0, 0, SRCCOPY);
         }
+        self.clip_commit_edit();
+    }
+
+    /// The commit box is a child window, so it draws on top of anything painted on the main
+    /// window, including overlays (command palette, quick pick, input box, dialog). While an
+    /// overlay covers it, the covered part is cut out of its window region so the overlay shows
+    /// through. Changing the region invalidates the uncovered area, which then repaints once.
+    fn clip_commit_edit(&mut self) {
+        let mut er = rect(0, 0, 0, 0);
+        unsafe {
+            GetWindowRect(self.commit_edit, &mut er);
+            MapWindowPoints(null_mut(), self.hwnd, &mut er as *mut RECT as *mut POINT, 2);
+        }
+        let ov = self.overlay_bounds.filter(|o| o.left < er.right && er.left < o.right && o.top < er.bottom && er.top < o.bottom);
+        let key = ov.map(|o| [er.left, er.top, er.right, er.bottom, o.left, o.top, o.right, o.bottom]);
+        if key == self.edit_clip {
+            return;
+        }
+        self.edit_clip = key;
+        unsafe {
+            match ov {
+                Some(o) => {
+                    let rgn = CreateRectRgn(0, 0, rw(&er), rh(&er));
+                    let cut = CreateRectRgn(o.left - er.left, o.top - er.top, o.right - er.left, o.bottom - er.top);
+                    CombineRgn(rgn, rgn, cut, RGN_DIFF);
+                    DeleteObject(cut as HGDIOBJ);
+                    SetWindowRgn(self.commit_edit, rgn, 1); // the system owns rgn from here on
+                }
+                None => {
+                    SetWindowRgn(self.commit_edit, null_mut(), 1);
+                }
+            }
+        }
     }
 
     pub fn release_buffer(&mut self) {
@@ -352,10 +391,14 @@ impl App {
     fn paint_activity(&mut self, g: &Gfx) {
         let r = self.l.activity;
         g.fill(&r, self.t.sidebar);
-        g.vline(r.right - 1, r.top, r.bottom, self.t.border);
+        // the border and the active-item stripe sit on the edge facing the side bar
+        let right = self.st.sidebar_right;
+        g.vline(if right { r.left } else { r.right - 1 }, r.top, r.bottom, self.t.border);
+        let inner = if right { rect(r.left + 1, r.top, r.right, r.bottom) } else { rect(r.left, r.top, r.right - 1, r.bottom) };
         // source control item (active)
-        let item = xywh(r.left, r.top, rw(&r) - 1, self.s(48));
-        g.fill(&rect(item.left, item.top, item.left + self.s(2), item.bottom), self.t.accent);
+        let item = xywh(inner.left, inner.top, rw(&inner), self.s(48));
+        let stripe = if right { rect(item.right - self.s(2), item.top, item.right, item.bottom) } else { rect(item.left, item.top, item.left + self.s(2), item.bottom) };
+        g.fill(&stripe, self.t.accent);
         draw_branch_icon(g, item.left + rw(&item) / 2, item.top + rh(&item) / 2, self.s(24), self.t.fg_strong, self.scale);
         let count = self.repo.as_ref().map(|r| r.status.files.len()).unwrap_or(0);
         if count > 0 || !self.ops.is_empty() {
@@ -365,11 +408,11 @@ impl App {
             g.round_rect(&b, self.s(16), self.t.accent, None);
             g.text_in(&b, &label, self.fonts.cap, self.t.accent_fg, DT_LINE | DT_CENTER);
         }
-        let srch = xywh(r.left, r.top + self.s(48), rw(&r) - 1, self.s(48));
+        let srch = xywh(inner.left, r.top + self.s(48), rw(&inner), self.s(48));
         let hit = Hit::Cmd(Cmd::Palette);
         g.icon(&srch, I_SEARCH, self.fonts.icon_big, if self.hover == hit { self.t.fg_strong } else { self.t.fg_dim });
         self.hits.push((srch, hit));
-        let gear = xywh(r.left, r.bottom - self.s(48), rw(&r) - 1, self.s(48));
+        let gear = xywh(inner.left, r.bottom - self.s(48), rw(&inner), self.s(48));
         let hit = Hit::Cmd(Cmd::ToggleTheme);
         g.icon(&gear, '\u{E790}', self.fonts.icon_big, if self.hover == hit { self.t.fg_strong } else { self.t.fg_dim });
         self.hits.push((gear, hit));
@@ -378,8 +421,10 @@ impl App {
     fn paint_sidebar(&mut self, g: &Gfx) {
         let l = self.l;
         g.fill(&l.sidebar, self.t.sidebar);
-        g.vline(l.sidebar.right, l.sidebar.top, l.sidebar.bottom, self.t.border);
-        self.hits.push((rect(l.sidebar.right - self.s(2), l.sidebar.top, l.sidebar.right + self.s(3), l.sidebar.bottom), Hit::Sash(Sash::Sidebar)));
+        // border and resize sash on the edge facing the main area
+        let edge = if self.st.sidebar_right { l.sidebar.left - 1 } else { l.sidebar.right };
+        g.vline(edge, l.sidebar.top, l.sidebar.bottom, self.t.border);
+        self.hits.push((rect(edge - self.s(2), l.sidebar.top, edge + self.s(3), l.sidebar.bottom), Hit::Sash(Sash::Sidebar)));
         // title
         g.text_in(&rect(l.title.left + self.s(20), l.title.top, l.title.right - self.s(80), l.title.bottom), "SOURCE CONTROL", self.fonts.cap, self.t.fg, DT_LINE);
         let bs = self.s(22);
@@ -609,16 +654,48 @@ impl App {
                         }
                     }
                 }
+                CRow::Dir(di) => {
+                    let Some(dr) = self.cdirs.get(di).cloned() else { continue };
+                    let hovered = matches!(self.hover, Hit::DirRow(x) | Hit::DirAct(x, _) if x == i);
+                    self.row_bg(g, &rr, false, self.focus_row == Some(i), hovered, area_focused);
+                    self.hits.push((rr, Hit::DirRow(i)));
+                    let x0 = rr.left + self.s(10) + dr.depth as i32 * self.s(TREE_INDENT);
+                    let col = self.collapsed_dirs.contains(&(group_id(dr.group), dr.path.clone()));
+                    g.icon(&xywh(x0, y, self.s(16), rh22), if col { I_RIGHT } else { I_DOWN }, self.fonts.icon_small, self.t.fg);
+                    g.icon(&xywh(x0 + self.s(18), y, self.s(16), rh22), I_FOLDER, self.fonts.icon_small, self.t.fg_dim);
+                    let acts: Vec<(char, u8)> = if hovered {
+                        match dr.group {
+                            Group::Merge => vec![(I_ADD, 0)],
+                            Group::Staged => vec![(I_REMOVE, 1)],
+                            Group::Changes => vec![(I_UNDO, 2), (I_ADD, 0)],
+                        }
+                    } else {
+                        vec![]
+                    };
+                    let text_right = rr.right - self.s(12) - acts.len() as i32 * self.s(22);
+                    g.text_in(&rect(x0 + self.s(40), y, text_right, y + rh22), &dr.label, self.fonts.ui, self.t.fg, DT_LINE);
+                    let mut ax = text_right;
+                    for (glyph, a) in acts {
+                        self.icon_button(g, xywh(ax, y + self.s(1), self.s(20), self.s(20)), glyph, Hit::DirAct(i, a), true);
+                        ax += self.s(22);
+                    }
+                }
                 CRow::File(fi) => {
                     let Some(f) = self.file(fi).cloned() else { continue };
                     let selected = self.sel.contains(&(group_id(f.group), f.path.clone()));
                     let hovered = matches!(self.hover, Hit::FileRow(x) | Hit::FileAct(x, _) if x == i);
                     self.row_bg(g, &rr, selected, self.focus_row == Some(i), hovered, area_focused);
-                    let x0 = rr.left + self.s(28);
+                    // registered before the action buttons so the buttons (pushed later) win the hit test
+                    self.hits.push((rr, Hit::FileRow(i)));
+                    let tree = self.st.tree_view;
+                    let depth = if tree { self.crow_depth.get(i).copied().unwrap_or(0) as i32 } else { 0 };
+                    // tree rows: chevron column + indent, so names line up under their folder's name
+                    let x0 = if tree { rr.left + self.s(28) + depth * self.s(TREE_INDENT) } else { rr.left + self.s(28) };
                     let color = self.git_color(&f);
                     g.icon(&xywh(x0, y, self.s(16), rh22), I_DOC, self.fonts.icon_small, self.t.fg_dim);
                     let name = short_name(&f.path).to_string();
-                    let dir = f.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+                    // the folder is shown by the tree itself; list view shows it after the name
+                    let dir = if tree { String::new() } else { f.path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default() };
                     let nx = x0 + self.s(22);
                     let letter_w = self.s(28);
                     let acts: Vec<(char, u8)> = if hovered || selected {
@@ -638,8 +715,9 @@ impl App {
                         let sw = nw.min(text_right - nx);
                         g.hline(nx, nx + sw, y + rh22 / 2 + self.s(1), color);
                     }
-                    if !dir.is_empty() && nx + nw + self.s(8) < text_right {
+                    if (!dir.is_empty() || f.orig.is_some()) && nx + nw + self.s(8) < text_right {
                         let d = match &f.orig {
+                            Some(o) if dir.is_empty() => format!("\u{2190} {}", short_name(o)),
                             Some(o) => format!("{dir} \u{2190} {}", short_name(o)),
                             None => dir,
                         };
@@ -651,7 +729,6 @@ impl App {
                         ax += self.s(22);
                     }
                     g.text_in(&rect(rr.right - letter_w, y, rr.right - self.s(12), y + rh22), &f.letter().to_string(), self.fonts.small, color, DT_LINE | DT_CENTER);
-                    self.hits.push((rr, Hit::FileRow(i)));
                 }
             }
         }
@@ -1295,6 +1372,7 @@ impl App {
     // ------------------------------------------------------------- overlay
 
     fn paint_overlay(&mut self, g: &Gfx) {
+        self.overlay_bounds = None;
         if self.overlay.is_none() {
             return;
         }
@@ -1308,6 +1386,7 @@ impl App {
                 let vis = (filtered.len() as i32).min(15);
                 let total = rect(b.left, b.top, b.right, b.bottom + vis * rh22 + self.s(6));
                 let shadow = rect(total.left - 1, total.top - 1, total.right + 1, total.bottom + 1);
+                self.overlay_bounds = Some(shadow);
                 g.round_rect(&shadow, self.s(8), crate::theme::blend_colorref(self.t.editor, 0, 0.5), None);
                 g.round_rect(&total, self.s(6), self.t.widget_bg, Some(self.t.widget_border));
                 let er = rect(b.left + self.s(6), b.top + self.s(7), b.right - self.s(6), b.top + self.s(35));
@@ -1361,6 +1440,7 @@ impl App {
             }
             OverlayKind::Input { prompt, .. } => {
                 let total = rect(b.left, b.top, b.right, b.bottom + self.s(28));
+                self.overlay_bounds = Some(total);
                 g.round_rect(&total, self.s(6), self.t.widget_bg, Some(self.t.widget_border));
                 let er = rect(b.left + self.s(6), b.top + self.s(7), b.right - self.s(6), b.top + self.s(35));
                 g.fill(&er, self.t.input_bg);
@@ -1377,7 +1457,9 @@ impl App {
                 let hgt = self.s(30) + mh + dh + self.s(70);
                 let y = (rh(&c) - hgt) / 3;
                 let box_ = rect(x, y, x + w, y + hgt);
-                g.round_rect(&rect(box_.left - 2, box_.top - 2, box_.right + 2, box_.bottom + 2), self.s(8), crate::theme::blend_colorref(self.t.editor, 0, 0.5), None);
+                let shadow = rect(box_.left - 2, box_.top - 2, box_.right + 2, box_.bottom + 2);
+                self.overlay_bounds = Some(shadow);
+                g.round_rect(&shadow, self.s(8), crate::theme::blend_colorref(self.t.editor, 0, 0.5), None);
                 g.round_rect(&box_, self.s(6), self.t.widget_bg, Some(self.t.widget_border));
                 g.icon(&xywh(x + self.s(20), y + self.s(26), self.s(40), self.s(40)), I_WARN, self.fonts.icon_big, self.t.warning);
                 g.text_in(&rect(tr.left, y + self.s(28), tr.right, y + self.s(28) + mh), message, self.fonts.ui, self.t.fg_strong, DT_WORDBREAK | DT_NOPREFIX);
@@ -1426,6 +1508,7 @@ impl App {
             match *d {
                 Drag::Sash(s, start, orig) => {
                     let delta = match s {
+                        Sash::Sidebar if self.st.sidebar_right => start - x,
                         Sash::Sidebar => x - start,
                         _ => y - start,
                     };
@@ -1562,6 +1645,27 @@ impl App {
         self.focus = Focus::Changes;
     }
 
+    /// Collapses / expands the tree folder at row `i` (`expand`: None toggles).
+    fn toggle_dir(&mut self, i: usize, expand: Option<bool>) {
+        let Some(CRow::Dir(d)) = self.crows.get(i).copied() else { return };
+        let Some(dr) = self.cdirs.get(d) else { return };
+        let key = (group_id(dr.group), dr.path.clone());
+        let collapsed = self.collapsed_dirs.contains(&key);
+        let collapse = expand.map(|e| !e).unwrap_or(!collapsed);
+        self.focus_row = Some(i);
+        self.focus = Focus::Changes;
+        if collapse == collapsed {
+            return;
+        }
+        if collapse {
+            self.collapsed_dirs.insert(key);
+        } else {
+            self.collapsed_dirs.remove(&key);
+        }
+        self.rebuild_changes();
+        self.clamp_scroll(Area::Changes);
+    }
+
     fn open_row(&mut self, i: usize) {
         if let Some(CRow::File(fi)) = self.crows.get(i).copied() {
             let f = self.file(fi).cloned().unwrap();
@@ -1638,6 +1742,13 @@ impl App {
                         (Group::Changes, 2) => self.discard_all(),
                         _ => {}
                     }
+                }
+            }
+            Hit::DirRow(i) => self.toggle_dir(i, None),
+            Hit::DirAct(i, a) => {
+                if let Some(CRow::Dir(d)) = self.crows.get(i).copied() {
+                    let files = self.dir_files(d);
+                    self.file_action(files, a);
                 }
             }
             Hit::FileRow(i) => {
@@ -1890,8 +2001,10 @@ impl App {
             m.it_if("Open in File Explorer", has, |a| a.exec(Cmd::OpenExplorer)),
             m.it_if("Open Terminal", has, |a| a.exec(Cmd::OpenTerminal)),
             MenuItem::Sep,
+            m.check("View as Tree", self.st.tree_view, |a| a.exec(Cmd::ToggleTreeView)),
             m.check("Show Output", self.st.output_visible, |a| a.exec(Cmd::ToggleOutput)),
             m.check("Dark Theme", self.st.dark, |a| a.exec(Cmd::ToggleTheme)),
+            m.cmd(if self.st.sidebar_right { "Move Primary Side Bar Left" } else { "Move Primary Side Bar Right" }, Cmd::ToggleSidebarPos),
             m.cmd("Show All Commands...", Cmd::Palette),
         ];
         let _ = y;
@@ -1909,6 +2022,12 @@ impl App {
             return;
         }
         let mut m = Menu::new();
+        // like VS Code: right-click the activity bar or the side bar title to move the side bar
+        if contains(&self.l.activity, x, y) || contains(&self.l.title, x, y) {
+            let items = vec![m.cmd(if self.st.sidebar_right { "Move Primary Side Bar Left" } else { "Move Primary Side Bar Right" }, Cmd::ToggleSidebarPos)];
+            self.show_menu(x, y, items, m);
+            return;
+        }
         let items: Vec<MenuItem> = match hit {
             Hit::FileRow(i) | Hit::FileAct(i, _) => {
                 if let Some(CRow::File(fi)) = self.crows.get(i).copied() {
@@ -1954,6 +2073,32 @@ impl App {
                 v.push(m.it("Reveal in File Explorer", move |_| win::reveal(&abs2)));
                 v.push(m.it("Copy Path", move |a| win::set_clipboard(a.hwnd, &abs3)));
                 v.push(m.it("Copy Relative Path", move |a| win::set_clipboard(a.hwnd, &rel)));
+                v
+            }
+            Hit::DirRow(i) | Hit::DirAct(i, _) => {
+                let Some(CRow::Dir(d)) = self.crows.get(i).copied() else { return };
+                let Some(dr) = self.cdirs.get(d).cloned() else { return };
+                let Some(root) = self.root() else { return };
+                self.focus_row = Some(i);
+                let files = self.dir_files(d);
+                let (f1, f2) = (files.clone(), files);
+                let abs = root.join(&dr.path).display().to_string().replace('/', "\\");
+                let (abs2, rel) = (abs.clone(), dr.path.clone());
+                let mut v = Vec::new();
+                match dr.group {
+                    Group::Staged => v.push(m.it("Unstage Changes", move |a| a.unstage(f1))),
+                    Group::Merge => v.push(m.it("Stage Changes (Mark Resolved)", move |a| a.stage(f1))),
+                    Group::Changes => {
+                        v.push(m.it("Stage Changes", move |a| a.stage(f1)));
+                        v.push(m.it("Discard Changes", move |a| a.discard(f2)));
+                    }
+                }
+                v.push(MenuItem::Sep);
+                v.push(m.it("Reveal in File Explorer", move |_| win::reveal(&abs)));
+                v.push(m.it("Copy Path", move |a| win::set_clipboard(a.hwnd, &abs2)));
+                v.push(m.it("Copy Relative Path", move |a| win::set_clipboard(a.hwnd, &rel)));
+                v.push(MenuItem::Sep);
+                v.push(m.check("View as Tree", true, |a| a.exec(Cmd::ToggleTreeView)));
                 v
             }
             Hit::GroupRow(i) | Hit::GroupAct(i, _) => match self.crows.get(i) {
@@ -2210,9 +2355,30 @@ impl App {
                     self.collapsed[id] = !self.collapsed[id];
                     self.rebuild_changes();
                 }
+                Some(CRow::Dir(_)) => self.toggle_dir(cur, None),
                 Some(CRow::File(_)) => self.open_row(cur),
                 None => {}
             },
+            // Left: collapse an open folder, otherwise jump to the parent folder / group
+            (0x25, false) => {
+                let open_dir = matches!(self.crows.get(cur), Some(CRow::Dir(d)) if self.cdirs.get(*d).map(|dr| !self.collapsed_dirs.contains(&(group_id(dr.group), dr.path.clone()))).unwrap_or(false));
+                if open_dir {
+                    self.toggle_dir(cur, Some(false));
+                } else if !matches!(self.crows.get(cur), Some(CRow::Group(_))) {
+                    let depth = self.crow_depth.get(cur).copied().unwrap_or(0);
+                    let parent = (0..cur).rev().find(|&r| match self.crows[r] {
+                        CRow::Group(_) => true,
+                        CRow::Dir(_) => self.crow_depth[r] < depth,
+                        CRow::File(_) => false,
+                    });
+                    if let Some(p) = parent {
+                        self.focus_row = Some(p);
+                        self.reveal_row(Area::Changes, p);
+                    }
+                }
+            }
+            // Right: expand a collapsed folder
+            (0x27, false) => self.toggle_dir(cur, Some(true)),
             (0x41, true) => {
                 // Ctrl+A select all files
                 if let Some(s) = self.status() {

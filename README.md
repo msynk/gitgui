@@ -67,7 +67,7 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
 
 ## Features
 
-- **Changes view:** Merge / Staged / Changes groups, git status colors and letters, hover actions (open file, discard, stage, unstage), multi-select (Ctrl/Shift), collapsible groups and context menus. You can also reveal a file in Explorer, copy its path, and add it to .gitignore.
+- **Changes view:** Merge / Staged / Changes groups shown as a list or a folder tree (*View as Tree* in the "..." menu, with compact folders and stage / unstage / discard per folder), git status colors and letters, hover actions (open file, discard, stage, unstage), multi-select (Ctrl/Shift), collapsible groups and context menus. You can also reveal a file in Explorer, copy its path, and add it to .gitignore.
 - **Commit box:** multi-line, `Ctrl+Enter` to commit. The Commit button has a dropdown (Amend, Commit All, Commit & Push, Commit & Sync). It turns into **Sync Changes N↓ M↑** or **Publish Branch** when relevant, or **Continue** during a rebase. Smart commit prompt and undo last commit are included, and the merge message is prefilled during a merge.
 - **Diff viewer:** side-by-side or inline, full file or collapsed to the changes, and F7 / Shift+F7 to move between changes.
   - **Stage / Unstage / Revert Block** buttons appear on hover.
@@ -85,7 +85,7 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
   - Mouse selection (double-click selects a word). `Ctrl+C` copies the selection, otherwise it sends ^C. `Ctrl+V` / `Shift+Insert` paste, and right-click copies or pastes like Windows Terminal.
   - New / kill / clear terminal. It is restored on startup if it was open, and pressing any key after the shell exits restarts it.
   - Started lazily: no shell process exists until you open the terminal. With it open and idle the app still uses 0 ms CPU and about 2.7 MB of private memory; the shell's own memory is separate (cmd ~6 MB, bash ~8 MB, Windows PowerShell ~80 MB).
-- **Workbench:** command palette (`Ctrl+Shift+P`), quick pick and input overlays, dialogs, toasts with "Open Git Log", an Output panel with every git command, and a status bar showing branch, sync and in-progress state. Dark and light themes (the native title bar and popup menus follow the theme), per-monitor DPI, and a recent folders list.
+- **Workbench:** command palette (`Ctrl+Shift+P`), quick pick and input overlays, dialogs, toasts with "Open Git Log", an Output panel with every git command, and a status bar showing branch, sync and in-progress state. Dark and light themes (the native title bar and popup menus follow the theme), a side bar that can sit on the left or the right (*View: Toggle Primary Side Bar Position*, or right-click the activity bar), per-monitor DPI, and a recent folders list.
 
 ## Keyboard
 
@@ -98,6 +98,7 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
 | `F7` / `Shift+F7` | Next / previous change |
 | `Tab` | Cycle focus: Changes, Graph, Diff |
 | `↑ ↓ Enter Space` | Navigate and open in lists |
+| `← →` (changes tree) | Collapse / expand folder, or go to the parent folder |
 | `S` / `U` (diff) | Stage / unstage selected lines |
 | `Ctrl+C` (diff) | Copy selected lines |
 | `Backspace` (diff) | Back to commit |
@@ -108,7 +109,7 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
 | ``Ctrl+Shift+` `` | New terminal |
 | `Ctrl+Shift+C` | External terminal in repo |
 
-Settings (theme, layout, recent folders) are stored in `%APPDATA%\GitGui\settings.ini`.
+Settings (theme, layout, side bar position, recent folders) are stored in `%APPDATA%\GitGui\settings.ini`.
 
 ## Source layout
 

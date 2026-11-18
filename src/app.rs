@@ -45,7 +45,75 @@ pub struct Repo {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CRow {
     Group(Group),
+    /// A folder in tree view (index into `App::cdirs`).
+    Dir(usize),
     File(usize),
+}
+
+/// A folder row of the Changes tree. `label` may span several path segments when
+/// single-child folders are compacted ("src/app"), like VS Code's compact folders.
+#[derive(Clone, Debug)]
+pub struct DirRow {
+    pub group: Group,
+    pub path: String,
+    pub label: String,
+    pub depth: u8,
+}
+
+/// Folder tree of one group's files, used to emit the tree view rows.
+#[derive(Default)]
+struct DirNode {
+    dirs: Vec<(String, DirNode)>,
+    files: Vec<usize>,
+}
+
+impl DirNode {
+    fn insert(&mut self, path: &str, file: usize) {
+        match path.split_once('/') {
+            Some((head, rest)) => {
+                let pos = match self.dirs.iter().position(|(n, _)| n == head) {
+                    Some(p) => p,
+                    None => {
+                        self.dirs.push((head.to_string(), DirNode::default()));
+                        self.dirs.len() - 1
+                    }
+                };
+                self.dirs[pos].1.insert(rest, file);
+            }
+            None => self.files.push(file),
+        }
+    }
+
+    /// Appends folders (sorted, compacted) and then files (sorted by name) as rows.
+    #[allow(clippy::too_many_arguments)]
+    fn emit(&self, group: Group, parent: &str, depth: u8, files: &[FileChange], collapsed: &HashSet<(u8, String)>, rows: &mut Vec<CRow>, depths: &mut Vec<u8>, dirs: &mut Vec<DirRow>) {
+        let mut subs: Vec<&(String, DirNode)> = self.dirs.iter().collect();
+        subs.sort_by_key(|(n, _)| n.to_lowercase());
+        for (name, first) in subs {
+            let mut label = name.clone();
+            let mut node = first;
+            while node.files.is_empty() && node.dirs.len() == 1 {
+                let (n, child) = &node.dirs[0];
+                label.push('/');
+                label.push_str(n);
+                node = child;
+            }
+            let path = if parent.is_empty() { label.clone() } else { format!("{parent}/{label}") };
+            let open = !collapsed.contains(&(group_id(group), path.clone()));
+            dirs.push(DirRow { group, path: path.clone(), label, depth });
+            rows.push(CRow::Dir(dirs.len() - 1));
+            depths.push(depth);
+            if open {
+                node.emit(group, &path, depth.saturating_add(1), files, collapsed, rows, depths, dirs);
+            }
+        }
+        let mut fs = self.files.clone();
+        fs.sort_by_key(|&i| short_name(&files[i].path).to_lowercase());
+        for i in fs {
+            rows.push(CRow::File(i));
+            depths.push(depth);
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -162,6 +230,8 @@ pub enum Hit {
     Cmd(Cmd),
     GroupRow(usize),
     GroupAct(usize, u8),
+    DirRow(usize),
+    DirAct(usize, u8),
     FileRow(usize),
     FileAct(usize, u8),
     CommitBtn,
@@ -289,6 +359,8 @@ cmds! {
     ClearTerminal => "Terminal: Clear", "";
     ToggleOutput => "View: Toggle Output", "Ctrl+J";
     ToggleTheme => "Preferences: Toggle Light/Dark Theme", "";
+    ToggleSidebarPos => "View: Toggle Primary Side Bar Position", "";
+    ToggleTreeView => "Source Control: Toggle View as Tree / List", "";
     ToggleInline => "Diff: Toggle Inline View", "";
     ToggleCompact => "Diff: Toggle Collapse Unchanged Regions", "";
     ToggleGraphAll => "Graph: Toggle Show All Branches", "";
@@ -321,7 +393,12 @@ pub struct App {
     pub log_loading: bool,
     pub log_key: String,
     pub crows: Vec<CRow>,
+    /// Indent level of each row in `crows` (tree view).
+    pub crow_depth: Vec<u8>,
+    pub cdirs: Vec<DirRow>,
     pub collapsed: [bool; 3],
+    /// Collapsed tree folders: (group id, folder path).
+    pub collapsed_dirs: HashSet<(u8, String)>,
     pub sel: HashSet<(u8, String)>,
     pub focus_row: Option<usize>,
     pub anchor_row: Option<usize>,
@@ -341,6 +418,10 @@ pub struct App {
     pub overlay_edit: HWND,
     pub edit_brush: HBRUSH,
     pub edit_lines: i32,
+    /// Area the open overlay covers (client coordinates), recorded while painting it.
+    pub overlay_bounds: Option<RECT>,
+    /// Commit box and overlay rectangles its window region was last cut for (None = unclipped).
+    pub edit_clip: Option<[i32; 8]>,
     pub l: Layout,
     pub graph_sel: Option<usize>,
     pub git_version: Option<String>,
@@ -417,7 +498,10 @@ impl App {
             log_loading: false,
             log_key: String::new(),
             crows: Vec::new(),
+            crow_depth: Vec::new(),
+            cdirs: Vec::new(),
             collapsed: [false; 3],
+            collapsed_dirs: HashSet::new(),
             sel: HashSet::new(),
             focus_row: None,
             anchor_row: None,
@@ -437,6 +521,8 @@ impl App {
             overlay_edit: std::ptr::null_mut(),
             edit_brush: std::ptr::null_mut(),
             edit_lines: 1,
+            overlay_bounds: None,
+            edit_clip: None,
             l: Layout::default(),
             graph_sel: None,
             git_version: None,
@@ -740,22 +826,40 @@ impl App {
     pub fn rebuild_changes(&mut self) {
         let Some(repo) = &self.repo else {
             self.crows.clear();
+            self.crow_depth.clear();
+            self.cdirs.clear();
             return;
         };
+        let tree = self.st.tree_view;
         let mut rows = Vec::new();
+        let mut depths = Vec::new();
+        let mut dirs = Vec::new();
         for g in [Group::Merge, Group::Staged, Group::Changes] {
             let idx: Vec<usize> = repo.status.files.iter().enumerate().filter(|(_, f)| f.group == g).map(|(i, _)| i).collect();
             if idx.is_empty() && g != Group::Changes {
                 continue;
             }
             rows.push(CRow::Group(g));
-            if !self.collapsed[group_id(g) as usize] {
+            depths.push(0);
+            if self.collapsed[group_id(g) as usize] {
+                continue;
+            }
+            if tree {
+                let mut node = DirNode::default();
+                for i in idx {
+                    node.insert(&repo.status.files[i].path, i);
+                }
+                node.emit(g, "", 0, &repo.status.files, &self.collapsed_dirs, &mut rows, &mut depths, &mut dirs);
+            } else {
+                depths.extend(std::iter::repeat(0).take(idx.len()));
                 rows.extend(idx.into_iter().map(CRow::File));
             }
         }
         let keys: HashSet<(u8, String)> = repo.status.files.iter().map(|f| (group_id(f.group), f.path.clone())).collect();
         self.sel.retain(|k| keys.contains(k));
         self.crows = rows;
+        self.crow_depth = depths;
+        self.cdirs = dirs;
         if let Some(f) = self.focus_row {
             if f >= self.crows.len() {
                 self.focus_row = if self.crows.is_empty() { None } else { Some(self.crows.len() - 1) };
@@ -1051,10 +1155,20 @@ impl App {
 
     // ------------------------------------------------------------ actions on files
 
+    /// Files of a tree folder row (same group, anywhere below the folder).
+    pub fn dir_files(&self, d: usize) -> Vec<FileChange> {
+        let (Some(repo), Some(dr)) = (&self.repo, self.cdirs.get(d)) else { return vec![] };
+        let prefix = format!("{}/", dr.path);
+        repo.status.files.iter().filter(|f| f.group == dr.group && f.path.starts_with(&prefix)).cloned().collect()
+    }
+
     pub fn selected_files(&self, row: Option<usize>) -> Vec<FileChange> {
         let Some(repo) = &self.repo else { return vec![] };
         let in_sel = |f: &FileChange| self.sel.contains(&(group_id(f.group), f.path.clone()));
         if let Some(r) = row {
+            if let Some(CRow::Dir(d)) = self.crows.get(r) {
+                return self.dir_files(*d);
+            }
             if let Some(CRow::File(i)) = self.crows.get(r) {
                 let f = &repo.status.files[*i];
                 if !in_sel(f) {
@@ -1877,7 +1991,7 @@ impl App {
     }
 
     pub fn exec(&mut self, c: Cmd) {
-        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::ToggleTheme | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
+        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::ToggleTheme | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
         if needs_repo && self.repo.is_none() {
             self.info("There are no available repositories. Open a folder first.");
             return;
@@ -1983,6 +2097,18 @@ impl App {
                 self.term_write(b"\x0c");
             }
             Cmd::ToggleTheme => self.toggle_theme(),
+            Cmd::ToggleTreeView => {
+                self.st.tree_view = !self.st.tree_view;
+                self.st.save();
+                self.rebuild_changes();
+                self.clamp_scroll(Area::Changes);
+                self.invalidate();
+            }
+            Cmd::ToggleSidebarPos => {
+                self.st.sidebar_right = !self.st.sidebar_right;
+                self.st.save();
+                self.layout();
+            }
             Cmd::ToggleInline => {
                 self.st.inline_diff = !self.st.inline_diff;
                 self.st.save();
@@ -2140,5 +2266,49 @@ pub fn build_change_view(root: &Path, f: &FileChange, ctx: &str, inline: bool) -
             let o = git::run(root, &a, None, false);
             diff_view_from(&o.text(), f, DiffKind::Index, inline, &format!("{name} (Index)"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn change(path: &str) -> FileChange {
+        FileChange { path: path.into(), orig: None, kind: Kind::Modified, group: Group::Changes, xy: ".M".into() }
+    }
+
+    /// Renders the rows as "depth:label" strings.
+    fn rows(paths: &[&str], collapsed: &[&str]) -> Vec<String> {
+        let files: Vec<FileChange> = paths.iter().map(|p| change(p)).collect();
+        let mut node = DirNode::default();
+        for (i, f) in files.iter().enumerate() {
+            node.insert(&f.path, i);
+        }
+        let collapsed: HashSet<(u8, String)> = collapsed.iter().map(|p| (group_id(Group::Changes), p.to_string())).collect();
+        let (mut r, mut d, mut dirs) = (Vec::new(), Vec::new(), Vec::new());
+        node.emit(Group::Changes, "", 0, &files, &collapsed, &mut r, &mut d, &mut dirs);
+        assert_eq!(r.len(), d.len());
+        r.iter()
+            .zip(&d)
+            .map(|(row, depth)| match row {
+                CRow::Dir(i) => format!("{depth}:{}/", dirs[*i].label),
+                CRow::File(i) => format!("{depth}:{}", short_name(&files[*i].path)),
+                CRow::Group(_) => unreachable!(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn folders_first_sorted_and_compacted() {
+        let got = rows(&["src/ui.rs", "README.md", "src/app.rs", "docs/a/b/c.md", "Cargo.toml", "src/deep/x/y.rs"], &[]);
+        assert_eq!(got, vec!["0:docs/a/b/", "1:c.md", "0:src/", "1:deep/x/", "2:y.rs", "1:app.rs", "1:ui.rs", "0:Cargo.toml", "0:README.md"]);
+    }
+
+    #[test]
+    fn collapsed_folders_hide_their_contents() {
+        let got = rows(&["src/ui.rs", "src/deep/x/y.rs", "top.txt"], &["src/deep/x"]);
+        assert_eq!(got, vec!["0:src/", "1:deep/x/", "1:ui.rs", "0:top.txt"]);
+        let got = rows(&["src/ui.rs", "src/deep/x/y.rs", "top.txt"], &["src"]);
+        assert_eq!(got, vec!["0:src/", "0:top.txt"]);
     }
 }
