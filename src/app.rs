@@ -256,6 +256,8 @@ pub enum Hit {
     PanelTab(u8),
     TermBody,
     TermShellMenu,
+    TermTab(usize),
+    TermTabKill(usize),
 }
 
 pub enum Drag {
@@ -355,6 +357,9 @@ cmds! {
     ToggleTerminal => "View: Toggle Terminal", "Ctrl+`";
     NewTerminal => "Terminal: Create New Terminal", "Ctrl+Shift+`";
     KillTerminal => "Terminal: Kill the Active Terminal Instance", "";
+    FocusNextTerminal => "Terminal: Focus Next Terminal", "Ctrl+PageDown";
+    FocusPrevTerminal => "Terminal: Focus Previous Terminal", "Ctrl+PageUp";
+    RenameTerminal => "Terminal: Rename...", "";
     SelectShell => "Terminal: Select Default Profile", "";
     ClearTerminal => "Terminal: Clear", "";
     ToggleOutput => "View: Toggle Output", "Ctrl+J";
@@ -430,7 +435,9 @@ pub struct App {
     pub mouse: (i32, i32),
     pub pending_init: Option<PathBuf>,
     pub pending_file: Option<PathBuf>,
-    pub term: Option<crate::term_ui::TermSession>,
+    /// Terminal instances; `term_active` is the one shown in the panel.
+    pub terms: Vec<crate::term_ui::TermSession>,
+    pub term_active: usize,
     pub term_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub term_scroll: usize,
     pub term_sel: Option<((usize, usize), (usize, usize))>,
@@ -531,7 +538,8 @@ impl App {
             mouse: (0, 0),
             pending_init: None,
             pending_file: None,
-            term: None,
+            terms: Vec::new(),
+            term_active: 0,
             term_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             term_scroll: 0,
             term_sel: None,
@@ -1991,7 +1999,7 @@ impl App {
     }
 
     pub fn exec(&mut self, c: Cmd) {
-        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::ToggleTheme | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
+        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::ToggleTheme | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::FocusNextTerminal | Cmd::FocusPrevTerminal | Cmd::RenameTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
         if needs_repo && self.repo.is_none() {
             self.info("There are no available repositories. Open a folder first.");
             return;
@@ -2084,14 +2092,19 @@ impl App {
                 self.layout();
             }
             Cmd::ToggleTerminal => self.toggle_terminal(),
-            Cmd::NewTerminal => {
-                self.show_terminal(true);
-                self.start_terminal(None);
-            }
+            Cmd::NewTerminal => self.new_terminal(None),
             Cmd::KillTerminal => self.kill_terminal(),
+            Cmd::FocusNextTerminal => self.focus_next_terminal(1),
+            Cmd::FocusPrevTerminal => self.focus_next_terminal(-1),
+            Cmd::RenameTerminal => {
+                if self.terms.is_empty() {
+                    self.show_terminal(true);
+                }
+                self.rename_terminal(self.term_active);
+            }
             Cmd::SelectShell => self.select_shell(),
             Cmd::ClearTerminal => {
-                if let Some(t) = &mut self.term {
+                if let Some(t) = self.term_mut() {
                     t.screen.scrollback.clear();
                 }
                 self.term_write(b"\x0c");

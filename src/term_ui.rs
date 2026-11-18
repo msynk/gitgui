@@ -16,6 +16,16 @@ pub struct TermSession {
     pub screen: Screen,
     pub shell: Shell,
     pub exited: Option<String>,
+    /// Name given with "Rename...", shown instead of the profile name.
+    pub custom_name: Option<String>,
+    /// History scroll offset kept while another terminal is the active one.
+    pub saved_scroll: usize,
+}
+
+impl TermSession {
+    pub fn name(&self) -> &str {
+        self.custom_name.as_deref().unwrap_or(&self.shell.name)
+    }
 }
 
 impl App {
@@ -23,13 +33,42 @@ impl App {
         self.st.output_visible && self.st.panel_terminal
     }
 
+    /// The active terminal instance.
+    pub fn term(&self) -> Option<&TermSession> {
+        self.terms.get(self.term_active)
+    }
+
+    pub fn term_mut(&mut self) -> Option<&mut TermSession> {
+        self.terms.get_mut(self.term_active)
+    }
+
     pub fn term_cell(&self) -> (i32, i32) {
         (self.fonts.mono_w.max(1), self.fonts.mono_h.max(1))
     }
 
+    /// Width of the terminal tab list, shown on the right of the panel once there are
+    /// two or more terminals (VS Code's default "hide when there is a single terminal").
+    pub fn term_tabs_w(&self) -> i32 {
+        if self.terms.len() < 2 {
+            return 0;
+        }
+        self.s(160).min(rw(&self.l.output_body) * 35 / 100)
+    }
+
+    pub fn term_tabs_rect(&self) -> RECT {
+        let b = self.l.output_body;
+        rect(b.right - self.term_tabs_w(), b.top, b.right, b.bottom)
+    }
+
+    /// Panel body without the tab list.
+    pub fn term_area(&self) -> RECT {
+        let b = self.l.output_body;
+        rect(b.left, b.top, b.right - self.term_tabs_w(), b.bottom)
+    }
+
     /// Terminal grid area inside the panel body.
     pub fn term_rect(&self) -> RECT {
-        let b = self.l.output_body;
+        let b = self.term_area();
         rect(b.left + self.s(20), b.top + self.s(2), b.right - self.s(14), b.bottom - self.s(2))
     }
 
@@ -51,42 +90,109 @@ impl App {
         shells.iter().find(|s| s.name == self.st.terminal_shell).or_else(|| shells.first()).cloned().unwrap_or(Shell { name: "Command Prompt".into(), cmd: "cmd.exe".into() })
     }
 
-    pub fn start_terminal(&mut self, shell: Option<Shell>) {
-        let shell = shell.unwrap_or_else(|| self.default_shell());
-        self.term = None; // drops (closes) the previous pseudo console
+    /// Starts `shell` on a new pseudo console sized to the panel.
+    fn spawn_session(&mut self, shell: Shell) -> TermSession {
         let cwd = self.root().or_else(|| self.pending_init.clone()).or_else(|| std::env::var_os("USERPROFILE").map(Into::into)).unwrap_or_else(|| ".".into());
         let (cols, rows) = self.term_grid_size();
-        self.term_pending.store(false, Ordering::SeqCst);
         match Pty::spawn(&shell.cmd, &cwd, cols as u16, rows as u16, self.hwnd, WM_TERM, self.term_pending.clone()) {
-            Ok((pty, rx)) => {
-                self.term = Some(TermSession { pty: Some(pty), rx, screen: Screen::new(cols, rows), shell, exited: None });
-            }
+            Ok((pty, rx)) => TermSession { pty: Some(pty), rx, screen: Screen::new(cols, rows), shell, exited: None, custom_name: None, saved_scroll: 0 },
             Err(e) => {
                 let mut screen = Screen::new(cols, rows);
                 screen.feed(format!("\x1b[31m{e}\x1b[0m\r\n").as_bytes());
                 let (_, rx) = std::sync::mpsc::channel();
-                self.term = Some(TermSession { pty: None, rx, screen, shell, exited: Some(e.clone()) });
-                self.error(e);
+                self.error(e.clone());
+                TermSession { pty: None, rx, screen, shell, exited: Some(e), custom_name: None, saved_scroll: 0 }
             }
         }
-        self.term_scroll = 0;
+    }
+
+    /// Opens a new terminal instance (the default profile when `shell` is None) and makes it active.
+    pub fn start_terminal(&mut self, shell: Option<Shell>) {
+        let shell = shell.unwrap_or_else(|| self.default_shell());
+        let s = self.spawn_session(shell);
+        self.terms.push(s);
+        self.activate_terminal(self.terms.len() - 1);
+        // the tab list appears with the second terminal, which narrows every grid
+        self.resize_terminal();
+        self.invalidate();
+    }
+
+    /// Shows the terminal panel and opens a new terminal in it.
+    pub fn new_terminal(&mut self, shell: Option<Shell>) {
+        self.reveal_terminal_panel(true);
+        self.start_terminal(shell);
+    }
+
+    /// Restarts the terminal at `i` with the same profile (after its shell exited).
+    fn restart_terminal(&mut self, i: usize) {
+        let Some(old) = self.terms.get(i) else { return };
+        let (shell, name) = (old.shell.clone(), old.custom_name.clone());
+        let mut s = self.spawn_session(shell);
+        s.custom_name = name;
+        self.terms[i] = s; // drops (closes) the old pseudo console
+        if i == self.term_active {
+            self.term_scroll = 0;
+            self.term_sel = None;
+        }
+        self.invalidate();
+    }
+
+    pub fn activate_terminal(&mut self, i: usize) {
+        if i >= self.terms.len() {
+            return;
+        }
+        if i != self.term_active {
+            let scroll = self.term_scroll;
+            if let Some(t) = self.terms.get_mut(self.term_active) {
+                t.saved_scroll = scroll;
+            }
+            self.term_active = i;
+        }
+        self.term_scroll = self.terms[i].saved_scroll;
         self.term_sel = None;
         self.invalidate();
     }
 
-    pub fn show_terminal(&mut self, focus: bool) {
+    /// Activates the next (`delta` 1) or previous (`delta` -1) terminal, wrapping around.
+    pub fn focus_next_terminal(&mut self, delta: i32) {
+        let n = self.terms.len() as i32;
+        if n > 1 {
+            let i = (self.term_active as i32 + delta).rem_euclid(n);
+            self.activate_terminal(i as usize);
+        }
+        self.show_terminal(true);
+    }
+
+    pub fn rename_terminal(&mut self, i: usize) {
+        let Some(t) = self.terms.get(i) else { return };
+        let current = t.name().to_string();
+        self.input("Enter a new name for the terminal", &current, move |app, name| {
+            if let Some(t) = app.terms.get_mut(i) {
+                let name = name.trim();
+                t.custom_name = if name.is_empty() { None } else { Some(name.to_string()) };
+            }
+            app.invalidate();
+        });
+    }
+
+    /// Makes the terminal panel visible without starting a terminal.
+    fn reveal_terminal_panel(&mut self, focus: bool) {
         self.st.output_visible = true;
         self.st.panel_terminal = true;
         self.st.save();
         self.layout();
-        if self.term.is_none() {
-            self.start_terminal(None);
-        }
         if focus {
             self.focus = Focus::Terminal;
             unsafe {
                 SetFocus(self.hwnd);
             }
+        }
+    }
+
+    pub fn show_terminal(&mut self, focus: bool) {
+        self.reveal_terminal_panel(focus);
+        if self.terms.is_empty() {
+            self.start_terminal(None);
         }
         self.invalidate();
     }
@@ -102,13 +208,37 @@ impl App {
         }
     }
 
+    /// Kills the active terminal instance.
     pub fn kill_terminal(&mut self) {
-        self.term = None;
-        if self.terminal_visible() {
-            self.st.output_visible = false;
-            self.st.save();
-            self.focus = Focus::Changes;
-            self.layout();
+        self.kill_terminal_at(self.term_active);
+    }
+
+    /// Kills one terminal instance; closing the last one also hides the panel.
+    pub fn kill_terminal_at(&mut self, i: usize) {
+        if i >= self.terms.len() {
+            return;
+        }
+        self.terms.remove(i); // dropping the session closes its pseudo console
+        if self.terms.is_empty() {
+            self.term_active = 0;
+            self.term_scroll = 0;
+            self.term_sel = None;
+            if self.terminal_visible() {
+                self.st.output_visible = false;
+                self.st.save();
+                self.focus = Focus::Changes;
+                self.layout();
+            }
+        } else {
+            if i < self.term_active {
+                self.term_active -= 1;
+            } else if i == self.term_active {
+                self.term_active = i.min(self.terms.len() - 1);
+                self.term_scroll = self.terms[self.term_active].saved_scroll;
+                self.term_sel = None;
+            }
+            // the tab list disappears with the second to last terminal
+            self.resize_terminal();
         }
         self.invalidate();
     }
@@ -126,22 +256,21 @@ impl App {
                 it
             })
             .collect();
+        // like VS Code, this only changes the profile used by new terminals
         self.pick("Select your default terminal profile", items, |app, it| {
             app.st.terminal_shell = it.data.clone();
             app.st.save();
-            let shell = app.shells().into_iter().find(|s| s.name == it.data);
             app.show_terminal(true);
-            app.start_terminal(shell);
         });
     }
 
-    /// Resizes the emulator and the pseudo console to the panel.
+    /// Resizes every terminal's emulator and pseudo console to the panel.
     pub fn resize_terminal(&mut self) {
         if !self.terminal_visible() {
             return;
         }
         let (cols, rows) = self.term_grid_size();
-        if let Some(t) = &mut self.term {
+        for t in &mut self.terms {
             if t.screen.cols != cols || t.screen.rows != rows {
                 t.screen.resize(cols, rows);
                 if let Some(p) = &t.pty {
@@ -151,44 +280,61 @@ impl App {
         }
     }
 
+    /// Drains the output of every terminal (inactive ones keep running in the background).
     pub fn on_term_data(&mut self) {
         self.term_pending.store(false, Ordering::SeqCst);
-        let Some(t) = &mut self.term else { return };
-        let before = t.screen.scrolled_total;
-        let mut exited = false;
-        while let Ok(ev) = t.rx.try_recv() {
-            match ev {
-                TermEvent::Data(d) => {
-                    if let Some(path) = std::env::var_os("GITGUI_TERM_LOG") {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                            let _ = f.write_all(&d);
+        let log = std::env::var_os("GITGUI_TERM_LOG");
+        let active = self.term_active;
+        let mut active_added = None;
+        for (i, t) in self.terms.iter_mut().enumerate() {
+            let before = t.screen.scrolled_total;
+            let mut exited = false;
+            let mut got = false;
+            while let Ok(ev) = t.rx.try_recv() {
+                got = true;
+                match ev {
+                    TermEvent::Data(d) => {
+                        if let Some(path) = &log {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                                let _ = f.write_all(&d);
+                            }
                         }
+                        t.screen.feed(&d)
                     }
-                    t.screen.feed(&d)
+                    TermEvent::Exited => exited = true,
                 }
-                TermEvent::Exited => exited = true,
+            }
+            if !t.screen.replies.is_empty() {
+                let r = std::mem::take(&mut t.screen.replies);
+                if let Some(p) = &t.pty {
+                    p.write(&r);
+                }
+            }
+            if exited && t.exited.is_none() {
+                let code = t.pty.as_ref().and_then(|p| p.exit_code());
+                let msg = match code {
+                    Some(c) => format!("The terminal process \"{}\" terminated with exit code: {c}.", t.shell.name),
+                    None => format!("The terminal process \"{}\" terminated.", t.shell.name),
+                };
+                t.screen.feed(format!("\r\n\x1b[7m * {msg} Press any key to restart the terminal. \x1b[0m\r\n").as_bytes());
+                t.exited = Some(msg);
+            }
+            // keep the viewport stable when scrolled up into history
+            let added = (t.screen.scrolled_total - before) as usize;
+            if i == active {
+                if got {
+                    active_added = Some(added);
+                }
+            } else if t.saved_scroll > 0 {
+                t.saved_scroll = (t.saved_scroll + added).min(t.screen.scrollback.len());
             }
         }
-        if !t.screen.replies.is_empty() {
-            let r = std::mem::take(&mut t.screen.replies);
-            if let Some(p) = &t.pty {
-                p.write(&r);
-            }
-        }
-        if exited && t.exited.is_none() {
-            let code = t.pty.as_ref().and_then(|p| p.exit_code());
-            let msg = match code {
-                Some(c) => format!("The terminal process \"{}\" terminated with exit code: {c}.", t.shell.name),
-                None => format!("The terminal process \"{}\" terminated.", t.shell.name),
-            };
-            t.screen.feed(format!("\r\n\x1b[7m * {msg} Press any key to restart the terminal. \x1b[0m\r\n").as_bytes());
-            t.exited = Some(msg);
-        }
-        // keep the viewport stable when scrolled up into history
-        let added = (t.screen.scrolled_total - before) as usize;
+        let Some(added) = active_added else { return };
         if self.term_scroll > 0 {
-            self.term_scroll = (self.term_scroll + added).min(t.screen.scrollback.len());
+            if let Some(t) = self.terms.get(active) {
+                self.term_scroll = (self.term_scroll + added).min(t.screen.scrollback.len());
+            }
         }
         if self.terminal_visible() {
             self.invalidate();
@@ -196,10 +342,9 @@ impl App {
     }
 
     pub fn term_write(&mut self, data: &[u8]) {
-        if let Some(t) = &self.term {
+        if let Some(t) = self.term() {
             if t.exited.is_some() {
-                let shell = t.shell.clone();
-                self.start_terminal(Some(shell));
+                self.restart_terminal(self.term_active);
                 return;
             }
             if let Some(p) = &t.pty {
@@ -214,13 +359,13 @@ impl App {
     pub fn term_paste(&mut self) {
         let Some(text) = win::get_clipboard(self.hwnd) else { return };
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let bracketed = self.term.as_ref().map(|t| t.screen.bracketed_paste).unwrap_or(false);
+        let bracketed = self.term().map(|t| t.screen.bracketed_paste).unwrap_or(false);
         let data = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
         self.term_write(data.as_bytes());
     }
 
     pub fn term_selection_text(&self) -> Option<String> {
-        let t = self.term.as_ref()?;
+        let t = self.term()?;
         let (a, b) = self.term_sel?;
         let (s, e) = if a <= b { (a, b) } else { (b, a) };
         if s == e {
@@ -263,6 +408,14 @@ impl App {
                 self.start_terminal(None);
                 return true;
             }
+            (0x22, true, false) => {
+                self.focus_next_terminal(1);
+                return true;
+            }
+            (0x21, true, false) => {
+                self.focus_next_terminal(-1);
+                return true;
+            }
             (0x4A, true, false) => {
                 self.exec(Cmd::ToggleOutput);
                 return true;
@@ -286,11 +439,11 @@ impl App {
             return true;
         }
         if shift && (vk == 0x21 || vk == 0x22) {
-            let page = self.term.as_ref().map(|t| t.screen.rows).unwrap_or(10);
+            let page = self.term().map(|t| t.screen.rows).unwrap_or(10);
             self.term_scroll_by(if vk == 0x21 { page as i32 } else { -(page as i32) });
             return true;
         }
-        let app_cursor = self.term.as_ref().map(|t| t.screen.app_cursor).unwrap_or(false);
+        let app_cursor = self.term().map(|t| t.screen.app_cursor).unwrap_or(false);
         if let Some(seq) = term::key_sequence(vk, ctrl, shift, alt, app_cursor) {
             self.term_write(&seq);
             return true;
@@ -323,7 +476,7 @@ impl App {
     }
 
     pub fn term_scroll_by(&mut self, lines: i32) {
-        let Some(t) = &self.term else { return };
+        let Some(t) = self.term() else { return };
         if t.screen.in_alt_screen() {
             // full-screen apps (less, vim...) get arrow keys instead
             let seq: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
@@ -341,7 +494,7 @@ impl App {
 
     /// Absolute (line, col) under a client point.
     pub fn term_pos_at(&self, x: i32, y: i32) -> Option<(usize, usize)> {
-        let t = self.term.as_ref()?;
+        let t = self.term()?;
         let r = self.term_rect();
         let (cw, ch) = self.term_cell();
         let col = ((x - r.left).max(0) / cw).min(t.screen.cols as i32) as usize;
@@ -352,7 +505,7 @@ impl App {
 
     pub fn term_select_word(&mut self, x: i32, y: i32) {
         let Some((line, col)) = self.term_pos_at(x, y) else { return };
-        let Some(t) = &self.term else { return };
+        let Some(t) = self.term() else { return };
         let Some(l) = t.screen.line(line) else { return };
         let is_word = |c: char| !c.is_whitespace() && !"\"'()[]{}<>|,;`".contains(c);
         if col >= l.len() || !is_word(l[col].ch) {
@@ -390,10 +543,11 @@ impl App {
     }
 
     pub fn paint_terminal(&mut self, g: &Gfx) {
-        let area = self.l.output_body;
+        let area = self.term_area();
         let r = self.term_rect();
         self.hits.push((area, Hit::TermBody));
-        let Some(t) = &self.term else {
+        self.paint_term_tabs(g);
+        let Some(t) = self.term() else {
             g.text_in(&r, "Starting terminal...", self.fonts.ui, self.t.fg_dim, win::DT_LINE);
             return;
         };
@@ -474,5 +628,46 @@ impl App {
             let ty = area.top + ((h - th) as f32 * pos as f32 / (total - rows) as f32) as i32;
             g.fill(&rect(area.right - self.s(10), ty, area.right, ty + th), self.t.scroll_thumb);
         }
+    }
+
+    /// Tab list on the right of the panel (only with two or more terminals).
+    fn paint_term_tabs(&mut self, g: &Gfx) {
+        if self.terms.len() < 2 {
+            return;
+        }
+        let tr = self.term_tabs_rect();
+        g.vline(tr.left, tr.top, tr.bottom, self.t.border);
+        let rh22 = self.s(22);
+        let focused = self.focus == Focus::Terminal && unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() } == self.hwnd;
+        let saved = g.clip(&tr);
+        let names: Vec<(String, bool)> = self.terms.iter().map(|t| (t.name().to_string(), t.exited.is_some())).collect();
+        for (i, (name, exited)) in names.into_iter().enumerate() {
+            let row = rect(tr.left + 1, tr.top + i as i32 * rh22, tr.right, tr.top + (i as i32 + 1) * rh22);
+            if row.top >= tr.bottom {
+                break;
+            }
+            let active = i == self.term_active;
+            let hovered = matches!(self.hover, Hit::TermTab(x) | Hit::TermTabKill(x) if x == i);
+            if active {
+                g.fill(&row, if focused { self.t.sel } else { self.t.sel_inactive });
+            } else if hovered {
+                g.fill(&row, self.t.hover);
+            }
+            self.hits.push((row, Hit::TermTab(i)));
+            let fg = if exited { self.t.fg_dim } else { self.t.fg };
+            g.icon(&rect(row.left + self.s(8), row.top, row.left + self.s(26), row.bottom), '\u{E756}', self.fonts.icon_small, fg);
+            let kill_w = if hovered || active { self.s(24) } else { 0 };
+            g.text_in(&rect(row.left + self.s(30), row.top, row.right - self.s(6) - kill_w, row.bottom), &name, self.fonts.small, fg, win::DT_LINE);
+            if kill_w > 0 {
+                let kr = rect(row.right - self.s(24), row.top + self.s(1), row.right - self.s(4), row.bottom - self.s(1));
+                let hit = Hit::TermTabKill(i);
+                if self.hover == hit {
+                    g.round_rect(&kr, self.s(5), self.t.toolbar_hover, None);
+                }
+                g.icon(&kr, '\u{E74D}', self.fonts.icon_small, self.t.fg);
+                self.hits.push((kr, hit));
+            }
+        }
+        g.unclip(saved);
     }
 }

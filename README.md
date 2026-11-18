@@ -83,7 +83,8 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
   - Profiles are detected automatically: PowerShell 7, Windows PowerShell, Command Prompt, Git Bash and WSL. Pick one from the dropdown or with *Terminal: Select Default Profile*.
   - Starts in the repository folder, with 3,000 lines of scrollback (wheel or Shift+PgUp/PgDn).
   - Mouse selection (double-click selects a word). `Ctrl+C` copies the selection, otherwise it sends ^C. `Ctrl+V` / `Shift+Insert` paste, and right-click copies or pastes like Windows Terminal.
-  - New / kill / clear terminal. It is restored on startup if it was open, and pressing any key after the shell exits restarts it.
+  - Multiple terminals, like VS Code: `+` (or ``Ctrl+Shift+` ``) opens another one, and with two or more a tab list appears on the right of the panel (click to switch, trash icon to kill, right-click to rename or kill). `Ctrl+PageDown` / `Ctrl+PageUp` switch between them, and terminals in the background keep running.
+  - Kill / clear / rename terminal. It is restored on startup if it was open, and pressing any key after the shell exits restarts it.
   - Started lazily: no shell process exists until you open the terminal. With it open and idle the app still uses 0 ms CPU and about 2.7 MB of private memory; the shell's own memory is separate (cmd ~6 MB, bash ~8 MB, Windows PowerShell ~80 MB).
 - **Workbench:** command palette (`Ctrl+Shift+P`), quick pick and input overlays, dialogs, toasts with "Open Git Log", an Output panel with every git command, and a status bar showing branch, sync and in-progress state. Dark and light themes (the native title bar and popup menus follow the theme), a side bar that can sit on the left or the right (*View: Toggle Primary Side Bar Position*, or right-click the activity bar), per-monitor DPI, and a recent folders list.
 
@@ -107,6 +108,7 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
 | `Ctrl+J` | Toggle Output |
 | ``Ctrl+` `` | Toggle integrated terminal |
 | ``Ctrl+Shift+` `` | New terminal |
+| `Ctrl+PageDown` / `Ctrl+PageUp` (terminal) | Next / previous terminal |
 | `Ctrl+Shift+C` | External terminal in repo |
 
 Settings (theme, layout, side bar position, recent folders) are stored in `%APPDATA%\GitGui\settings.ini`.

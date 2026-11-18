@@ -1220,12 +1220,12 @@ impl App {
             rx -= bs + self.s(2);
             self.icon_button(g, xywh(rx, y, bs, bs), I_ADD, Hit::Cmd(Cmd::NewTerminal), true);
             rx -= self.s(4);
-            let name = match &self.term {
+            let name = match self.term() {
                 Some(t) => {
                     let title = t.screen.title.trim();
                     // shells often set the title to their own executable path; show the profile name then
                     let is_path = title.to_ascii_lowercase().ends_with(".exe") || title.contains(":\\");
-                    if title.is_empty() || is_path { t.shell.name.clone() } else { format!("{} \u{2022} {}", t.shell.name, title) }
+                    if title.is_empty() || is_path || t.custom_name.is_some() { t.name().to_string() } else { format!("{} \u{2022} {}", t.name(), title) }
                 }
                 None => "Terminal".into(),
             };
@@ -1691,7 +1691,7 @@ impl App {
 
     pub fn on_lbutton_down(&mut self, x: i32, y: i32, ctrl: bool, shift: bool) {
         let hit = self.hit_test(x, y);
-        if self.focus == Focus::Terminal && !matches!(hit, Hit::TermBody | Hit::TermShellMenu | Hit::PanelTab(_) | Hit::Cmd(_) | Hit::Sash(_)) {
+        if self.focus == Focus::Terminal && !matches!(hit, Hit::TermBody | Hit::TermShellMenu | Hit::TermTab(_) | Hit::TermTabKill(_) | Hit::PanelTab(_) | Hit::Cmd(_) | Hit::Sash(_)) {
             self.focus = Focus::Changes;
         }
         unsafe {
@@ -1850,9 +1850,14 @@ impl App {
                     self.layout();
                 }
             }
+            Hit::TermTab(i) => {
+                self.focus = Focus::Terminal;
+                self.activate_terminal(i);
+            }
+            Hit::TermTabKill(i) => self.kill_terminal_at(i),
             Hit::TermBody => {
                 self.focus = Focus::Terminal;
-                if self.term.is_none() {
+                if self.terms.is_empty() {
                     self.start_terminal(None);
                 }
                 if let Some(p) = self.term_pos_at(x, y) {
@@ -1862,22 +1867,20 @@ impl App {
             }
             Hit::TermShellMenu => {
                 let mut m = Menu::new();
-                let current = self.term.as_ref().map(|t| t.shell.name.clone()).unwrap_or_default();
+                let current = self.term().map(|t| t.shell.name.clone()).unwrap_or_default();
                 let mut items: Vec<MenuItem> = self
                     .shells()
                     .into_iter()
                     .map(|sh| {
                         let label = format!("New {} Terminal", sh.name);
                         let checked = sh.name == current;
-                        m.check(&label, checked, move |a| {
-                            a.show_terminal(true);
-                            a.start_terminal(Some(sh));
-                        })
+                        m.check(&label, checked, move |a| a.new_terminal(Some(sh)))
                     })
                     .collect();
                 items.push(MenuItem::Sep);
                 items.push(m.cmd("Select Default Profile...", Cmd::SelectShell));
                 items.push(m.cmd("Clear", Cmd::ClearTerminal));
+                items.push(m.cmd("Rename...", Cmd::RenameTerminal));
                 items.push(m.cmd("Kill Terminal", Cmd::KillTerminal));
                 items.push(m.cmd("Open External Terminal", Cmd::OpenTerminal));
                 self.show_menu(x, y + self.s(12), items, m);
@@ -2074,6 +2077,10 @@ impl App {
                 v.push(m.it("Copy Path", move |a| win::set_clipboard(a.hwnd, &abs3)));
                 v.push(m.it("Copy Relative Path", move |a| win::set_clipboard(a.hwnd, &rel)));
                 v
+            }
+            Hit::TermTab(i) | Hit::TermTabKill(i) => {
+                self.activate_terminal(i);
+                vec![m.it("Rename...", move |a| a.rename_terminal(i)), m.it("Kill Terminal", move |a| a.kill_terminal_at(i)), MenuItem::Sep, m.cmd("New Terminal", Cmd::NewTerminal)]
             }
             Hit::DirRow(i) | Hit::DirAct(i, _) => {
                 let Some(CRow::Dir(d)) = self.crows.get(i).copied() else { return };
