@@ -126,6 +126,7 @@ impl App {
         if matches!(&self.view, MainView::Diff(d) if d.inline != self.st.inline_diff) {
             self.rebuild_rows();
         }
+        self.reload_text_view_if_changed();
     }
 
     pub fn close_tab(&mut self, i: usize) {

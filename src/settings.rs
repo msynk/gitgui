@@ -12,6 +12,8 @@ pub struct Settings {
     pub sidebar_right: bool,
     /// Primary side bar shown (VS Code "Toggle Primary Side Bar Visibility", Ctrl+B).
     pub sidebar_visible: bool,
+    /// Side bar view: 0 Source Control, 1 Explorer.
+    pub side_view: u8,
     /// Show the Changes list as a folder tree (VS Code "View as Tree").
     pub tree_view: bool,
     pub graph_split: f32,
@@ -43,6 +45,7 @@ impl Default for Settings {
             sidebar_w: 320,
             sidebar_right: false,
             sidebar_visible: true,
+            side_view: 0,
             tree_view: false,
             graph_split: 0.55,
             branches_open: true,
@@ -82,6 +85,7 @@ impl Settings {
                 "sidebar_w" => s.sidebar_w = v.parse().unwrap_or(320).clamp(180, 2000),
                 "sidebar_right" => s.sidebar_right = b,
                 "sidebar_visible" => s.sidebar_visible = b,
+                "side_view" => s.side_view = v.parse().unwrap_or(0).min(1),
                 "tree_view" => s.tree_view = b,
                 "graph_split" => s.graph_split = v.parse().unwrap_or(0.55f32).clamp(0.1, 0.9),
                 "branches_open" => s.branches_open = b,
@@ -122,6 +126,7 @@ impl Settings {
         out += &format!("sidebar_w={}\n", self.sidebar_w);
         out += &format!("sidebar_right={}\n", b(self.sidebar_right));
         out += &format!("sidebar_visible={}\n", b(self.sidebar_visible));
+        out += &format!("side_view={}\n", self.side_view);
         out += &format!("tree_view={}\n", b(self.tree_view));
         out += &format!("graph_split={}\n", self.graph_split);
         out += &format!("branches_open={}\n", b(self.branches_open));

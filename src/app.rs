@@ -27,7 +27,7 @@ pub type Then = Box<dyn FnOnce(&mut App) + Send>;
 pub type OnErr = Box<dyn FnOnce(&mut App, &GitError) -> bool + Send>;
 
 pub enum JobResult {
-    Refresh { gen: u64, status: GitResult<Status>, refs: Vec<RefInfo>, stashes: Vec<Stash> },
+    Refresh { gen: u64, status: GitResult<Status>, refs: Vec<RefInfo>, stashes: Vec<Stash>, ignored: Option<HashSet<String>> },
     Log { gen: u64, commits: Vec<Commit>, more: bool, append: bool },
     View { gen: u64, view: MainView, keep_scroll: bool },
     Op { title: String, result: GitResult<String>, then: Option<Then>, on_err: Option<OnErr> },
@@ -146,6 +146,8 @@ pub struct FileView {
     pub lines: Vec<String>,
     pub conflicts: Vec<diff::Conflict>,
     pub change: Option<FileChange>,
+    /// Modification time when loaded (text viewer: reload when the file changes).
+    pub mtime: Option<std::time::SystemTime>,
 }
 
 pub struct CommitView {
@@ -173,10 +175,12 @@ pub enum Area {
     Output = 3,
     Pick = 4,
     Branches = 5,
+    Explorer = 6,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
+    Explorer,
     Changes,
     Branches,
     Graph,
@@ -274,6 +278,9 @@ pub enum Hit {
     PanelMenu,
     Tab(usize),
     TabClose(usize),
+    ExplorerRow(usize),
+    ExplorerHeader,
+    ActivityView(u8),
     DiffRow(usize),
     DiffBlock(usize, u8),
     DiffBack,
@@ -308,6 +315,8 @@ pub struct Layout {
     pub sidebar: RECT,
     pub title: RECT,
     pub changes_header: RECT,
+    pub explorer_header: RECT,
+    pub explorer: RECT,
     pub edit: RECT,
     pub button: RECT,
     pub changes: RECT,
@@ -326,7 +335,7 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Self {
         let z = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        Layout { activity: z, sidebar: z, title: z, changes_header: z, edit: z, button: z, changes: z, branches_header: z, branches: z, graph_header: z, graph: z, main: z, main_header: z, main_body: z, output: z, output_body: z, status: z }
+        Layout { activity: z, sidebar: z, title: z, changes_header: z, explorer_header: z, explorer: z, edit: z, button: z, changes: z, branches_header: z, branches: z, graph_header: z, graph: z, main: z, main_header: z, main_body: z, output: z, output_body: z, status: z }
     }
 }
 
@@ -415,6 +424,10 @@ cmds! {
     ToggleBranchesSection => "Source Control: Toggle Branches Section", "";
     ToggleTheme => "Preferences: Toggle Light/Dark Theme", "";
     ToggleSidebar => "View: Toggle Primary Side Bar Visibility", "Ctrl+B";
+    ShowExplorer => "View: Show Explorer", "Ctrl+Shift+E";
+    ShowScm => "View: Show Source Control", "";
+    GotoFile => "Go to File...", "Ctrl+P";
+    ExplorerCollapse => "Explorer: Collapse Folders in Explorer", "";
     ToggleSidebarPos => "View: Toggle Primary Side Bar Position", "";
     ToggleTreeView => "Source Control: Toggle View as Tree / List", "";
     ToggleInline => "Diff: Toggle Inline View", "";
@@ -458,13 +471,15 @@ pub struct App {
     pub sel: HashSet<(u8, String)>,
     /// Rows of the Branches view.
     pub brows: Vec<crate::branches::BRow>,
+    /// Explorer view state.
+    pub ex: crate::explorer::Explorer,
     /// Selected Branches row, by key (see `brow_key`).
     pub branch_sel: Option<String>,
     /// Collapsed Branches groups ("local", "remote:<name>", "tags").
     pub collapsed_bgroups: HashSet<String>,
     pub focus_row: Option<usize>,
     pub anchor_row: Option<usize>,
-    pub scroll: [i32; 6],
+    pub scroll: [i32; 7],
     pub hscroll: i32,
     pub view: MainView,
     /// Editor tabs; `view` holds the active tab's view.
@@ -522,7 +537,7 @@ pub fn group_label(g: Group) -> &'static str {
     }
 }
 
-fn post(hwnd: isize) {
+pub fn post(hwnd: isize) {
     unsafe {
         PostMessageW(hwnd as HWND, WM_JOB, 0, 0);
     }
@@ -572,7 +587,7 @@ impl App {
             sel: HashSet::new(),
             focus_row: None,
             anchor_row: None,
-            scroll: [0; 6],
+            scroll: [0; 7],
             hscroll: 0,
             view: MainView::Empty,
             tabs: Vec::new(),
@@ -595,6 +610,7 @@ impl App {
             l: Layout::default(),
             graph_sel: None,
             brows: Vec::new(),
+            ex: crate::explorer::Explorer::default(),
             branch_sel: None,
             collapsed_bgroups: ["tags".to_string()].into_iter().collect(),
             git_version: None,
@@ -693,7 +709,8 @@ impl App {
         self.log_key.clear();
         self.sel.clear();
         self.crows.clear();
-        self.scroll = [0; 6];
+        self.scroll = [0; 7];
+        self.ex = crate::explorer::Explorer::default();
         self.brows.clear();
         self.branch_sel = None;
         self.view = MainView::Empty;
@@ -756,14 +773,17 @@ impl App {
         let gen = self.refresh_gen;
         let tx = self.tx.clone();
         let hwnd = self.hwnd as isize;
+        // the Explorer dims ignored files; only look them up while it is shown
+        let want_ignored = self.explorer_active();
         std::thread::spawn(move || {
-            let (status, (refs, stashes)) = std::thread::scope(|sc| {
+            let (status, (refs, stashes), ignored) = std::thread::scope(|sc| {
                 let a = sc.spawn(|| git::refs(&root));
                 let b = sc.spawn(|| git::stashes(&root));
+                let c = sc.spawn(|| if want_ignored { Some(crate::explorer::ignored(&root)) } else { None });
                 let s = git::status(&root);
-                (s, (a.join().unwrap_or_default(), b.join().unwrap_or_default()))
+                (s, (a.join().unwrap_or_default(), b.join().unwrap_or_default()), c.join().unwrap_or_default())
             });
-            let _ = tx.send(JobResult::Refresh { gen, status, refs, stashes });
+            let _ = tx.send(JobResult::Refresh { gen, status, refs, stashes, ignored });
             post(hwnd);
         });
     }
@@ -771,11 +791,14 @@ impl App {
     pub fn on_jobs(&mut self) {
         while let Ok(r) = self.rx.try_recv() {
             match r {
-                JobResult::Refresh { gen, status, refs, stashes } => {
+                JobResult::Refresh { gen, status, refs, stashes, ignored } => {
                     if gen != self.refresh_gen {
                         continue;
                     }
                     self.refreshing = false;
+                    if let Some(ig) = ignored {
+                        self.ex.ignored = ig;
+                    }
                     match status {
                         Ok(s) => self.apply_status(s, refs, stashes),
                         Err(e) => self.error(e.message),
@@ -879,6 +902,10 @@ impl App {
         self.rebuild_changes();
         self.rebuild_branches();
         self.clamp_scroll(Area::Branches);
+        if self.explorer_active() {
+            self.rebuild_explorer();
+        }
+        self.reload_text_view_if_changed();
         let r = self.repo.as_ref().unwrap();
         let mut key = format!("{:?}|{:?}|{:?}|{}", r.status.head, r.status.branch, r.status.upstream, self.st.graph_all);
         for rf in &r.refs {
@@ -2104,7 +2131,7 @@ impl App {
     }
 
     pub fn exec(&mut self, c: Cmd) {
-        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::CloseEditor | Cmd::CloseOtherEditors | Cmd::CloseAllEditors | Cmd::KeepEditor | Cmd::NextEditor | Cmd::PrevEditor | Cmd::TogglePanelMax | Cmd::PanelRestore | Cmd::PanelFullWidth | Cmd::PanelFullHeight | Cmd::PanelFullScreen | Cmd::ToggleGraphSection | Cmd::ToggleBranchesSection | Cmd::ToggleTheme | Cmd::ToggleSidebar | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::FocusNextTerminal | Cmd::FocusPrevTerminal | Cmd::RenameTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
+        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::CloseEditor | Cmd::CloseOtherEditors | Cmd::CloseAllEditors | Cmd::KeepEditor | Cmd::NextEditor | Cmd::PrevEditor | Cmd::TogglePanelMax | Cmd::PanelRestore | Cmd::PanelFullWidth | Cmd::PanelFullHeight | Cmd::PanelFullScreen | Cmd::ToggleGraphSection | Cmd::ToggleBranchesSection | Cmd::ToggleTheme | Cmd::ToggleSidebar | Cmd::ShowExplorer | Cmd::ShowScm | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::FocusNextTerminal | Cmd::FocusPrevTerminal | Cmd::RenameTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
         if needs_repo && self.repo.is_none() {
             self.info("There are no available repositories. Open a folder first.");
             return;
@@ -2259,7 +2286,8 @@ impl App {
             Cmd::NextChange => self.goto_change(1),
             Cmd::PrevChange => self.goto_change(-1),
             Cmd::FocusCommit => {
-                if !self.st.sidebar_visible {
+                if !self.st.sidebar_visible || self.st.side_view != 0 {
+                    self.st.side_view = 0;
                     self.set_sidebar_visible(true);
                 }
                 unsafe {
@@ -2267,6 +2295,15 @@ impl App {
                 }
             }
             Cmd::ToggleSidebar => self.set_sidebar_visible(!self.st.sidebar_visible),
+            Cmd::ShowExplorer | Cmd::ShowScm => {
+                let v = if c == Cmd::ShowExplorer { 1 } else { 0 };
+                if !(self.st.sidebar_visible && self.st.side_view == v) {
+                    self.set_side_view(v);
+                }
+                self.focus = if v == 1 { Focus::Explorer } else { Focus::Changes };
+            }
+            Cmd::GotoFile => self.goto_file(),
+            Cmd::ExplorerCollapse => self.explorer_collapse_all(),
             Cmd::ClearOutput => {
                 git::clear_log();
             }
@@ -2383,7 +2420,7 @@ pub fn build_change_view(root: &Path, f: &FileChange, ctx: &str, inline: bool) -
             let lines: Vec<String> = text.split('\n').map(|l| l.trim_end_matches('\r').to_string()).collect();
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
             let conflicts = diff::parse_conflicts(&refs);
-            MainView::File(FileView { title: format!("{name} (Merge Conflicts)"), path: f.path.clone(), lines, conflicts, change: Some(f.clone()) })
+            MainView::File(FileView { title: format!("{name} (Merge Conflicts)"), path: f.path.clone(), lines, conflicts, change: Some(f.clone()), mtime: None })
         }
         (Group::Changes, Kind::Untracked) => {
             let o = git::run(root, &["diff", "--no-index", "--no-color", "--no-ext-diff", ctx, "--", "/dev/null", &f.path], None, false);

@@ -163,6 +163,15 @@ impl App {
             (l.sidebar, l.title, l.changes_header, l.edit, l.button, l.changes) = (z, z, z, z, z, z);
             (l.graph_header, l.graph, l.branches_header, l.branches) = (z, z, z, z);
         }
+        // Explorer view: one section with the repository's folder tree
+        let explorer = side && self.st.side_view == 1;
+        if explorer {
+            let z = rect(0, 0, 0, 0);
+            l.explorer_header = rect(sx, avail_top, sx + sw, avail_top + hdr);
+            l.explorer = rect(sx, l.explorer_header.bottom, sx + sw, l.sidebar.bottom);
+            (l.changes_header, l.edit, l.button, l.changes) = (z, z, z, z);
+            (l.graph_header, l.graph, l.branches_header, l.branches) = (z, z, z, z);
+        }
         l.main = rect(mx, 0, mr, h - sb - out_h);
         l.output = rect(mx, l.main.bottom, mr, h - sb);
         match mode {
@@ -178,6 +187,7 @@ impl App {
                 l.output = rect(0, 0, w, h - sb);
                 (l.activity, l.sidebar, l.title, l.changes_header, l.edit, l.button, l.changes) = (z, z, z, z, z, z, z);
                 (l.graph_header, l.graph, l.branches_header, l.branches) = (z, z, z, z);
+                (l.explorer_header, l.explorer) = (z, z);
             }
         }
         l.main_header = rect(l.main.left, 0, l.main.right, self.s(35).min(l.main.bottom));
@@ -185,13 +195,13 @@ impl App {
         l.output_body = rect(l.output.left, l.output.top + self.s(35), l.output.right, l.output.bottom);
         self.l = l;
         unsafe {
-            let show = self.repo.is_some() && mode != PanelMode::FullScreen && side;
+            let show = self.repo.is_some() && mode != PanelMode::FullScreen && side && !explorer;
             ShowWindow(self.commit_edit, if show { SW_SHOW } else { SW_HIDE });
             let pad_x = self.s(6);
             let pad_y = self.s(4);
             MoveWindow(self.commit_edit, l.edit.left + pad_x, l.edit.top + pad_y, (rw(&l.edit) - pad_x * 2).max(10), (rh(&l.edit) - pad_y * 2).max(10), 1);
         }
-        for a in [Area::Changes, Area::Branches, Area::Graph, Area::Main, Area::Output] {
+        for a in [Area::Explorer, Area::Changes, Area::Branches, Area::Graph, Area::Main, Area::Output] {
             self.clamp_scroll(a);
         }
         self.resize_terminal();
@@ -322,6 +332,7 @@ impl App {
             Area::Changes => self.l.changes,
             Area::Graph => self.l.graph,
             Area::Branches => self.l.branches,
+            Area::Explorer => self.l.explorer,
             Area::Main => self.l.main_body,
             Area::Output => self.l.output_body,
             Area::Pick => {
@@ -344,6 +355,7 @@ impl App {
         match a {
             Area::Changes => self.crows.len() as i32 * rh22,
             Area::Branches => self.brows.len() as i32 * rh22,
+            Area::Explorer => self.ex.rows.len() as i32 * rh22,
             Area::Graph => (self.commits.len() as i32 + if self.has_more { 1 } else { 0 }) * rh22,
             Area::Main => match &self.view {
                 MainView::Diff(d) => d.rows.len() as i32 * self.line_h() + self.s(8),
@@ -428,7 +440,11 @@ impl App {
         if mode != PanelMode::FullScreen {
             self.paint_activity(&g);
             if self.st.sidebar_visible {
-                self.paint_sidebar(&g);
+                if self.st.side_view == 1 {
+                    self.paint_explorer(&g);
+                } else {
+                    self.paint_sidebar(&g);
+                }
             }
         }
         if !matches!(mode, PanelMode::FullHeight | PanelMode::FullScreen) {
@@ -516,17 +532,25 @@ impl App {
         let right = self.st.sidebar_right;
         g.vline(if right { r.left } else { r.right - 1 }, r.top, r.bottom, self.t.border);
         let inner = if right { rect(r.left + 1, r.top, r.right, r.bottom) } else { rect(r.left, r.top, r.right - 1, r.bottom) };
-        // source control item: like VS Code, clicking it shows / hides the side bar
-        let item = xywh(inner.left, inner.top, rw(&inner), self.s(48));
-        let visible = self.st.sidebar_visible;
-        if visible {
-            let stripe = if right { rect(item.right - self.s(2), item.top, item.right, item.bottom) } else { rect(item.left, item.top, item.left + self.s(2), item.bottom) };
-            g.fill(&stripe, self.t.accent);
+        // views: Explorer, Source Control. Clicking the shown one hides the side bar, like VS Code.
+        let mut item = rect(0, 0, 0, 0);
+        for (k, view) in [1u8, 0u8].into_iter().enumerate() {
+            let it = xywh(inner.left, inner.top + k as i32 * self.s(48), rw(&inner), self.s(48));
+            let active = self.st.sidebar_visible && self.st.side_view == view;
+            if active {
+                let stripe = if right { rect(it.right - self.s(2), it.top, it.right, it.bottom) } else { rect(it.left, it.top, it.left + self.s(2), it.bottom) };
+                g.fill(&stripe, self.t.accent);
+            }
+            let hit = Hit::ActivityView(view);
+            let fg = if active || self.hover == hit { self.t.fg_strong } else { self.t.fg_dim };
+            if view == 0 {
+                draw_branch_icon(g, it.left + rw(&it) / 2, it.top + rh(&it) / 2, self.s(24), fg, self.scale);
+                item = it;
+            } else {
+                g.icon(&it, '\u{E8C8}', self.fonts.icon_big, fg);
+            }
+            self.hits.push((it, hit));
         }
-        let hit = Hit::Cmd(Cmd::ToggleSidebar);
-        let icon_fg = if visible || self.hover == hit { self.t.fg_strong } else { self.t.fg_dim };
-        draw_branch_icon(g, item.left + rw(&item) / 2, item.top + rh(&item) / 2, self.s(24), icon_fg, self.scale);
-        self.hits.push((item, hit));
         let count = self.repo.as_ref().map(|r| r.status.files.len()).unwrap_or(0);
         if count > 0 || !self.ops.is_empty() {
             let label = if !self.ops.is_empty() { "\u{2026}".to_string() } else if count > 999 { "999+".into() } else { count.to_string() };
@@ -535,7 +559,7 @@ impl App {
             g.round_rect(&b, self.s(16), self.t.accent, None);
             g.text_in(&b, &label, self.fonts.cap, self.t.accent_fg, DT_LINE | DT_CENTER);
         }
-        let srch = xywh(inner.left, r.top + self.s(48), rw(&inner), self.s(48));
+        let srch = xywh(inner.left, r.top + self.s(96), rw(&inner), self.s(48));
         let hit = Hit::Cmd(Cmd::Palette);
         g.icon(&srch, I_SEARCH, self.fonts.icon_big, if self.hover == hit { self.t.fg_strong } else { self.t.fg_dim });
         self.hits.push((srch, hit));
@@ -543,6 +567,94 @@ impl App {
         let hit = Hit::Cmd(Cmd::ToggleTheme);
         g.icon(&gear, '\u{E790}', self.fonts.icon_big, if self.hover == hit { self.t.fg_strong } else { self.t.fg_dim });
         self.hits.push((gear, hit));
+    }
+
+    /// Explorer side bar: title, repository header and the folder tree.
+    fn paint_explorer(&mut self, g: &Gfx) {
+        let l = self.l;
+        g.fill(&l.sidebar, self.t.sidebar);
+        let edge = if self.st.sidebar_right { l.sidebar.left - 1 } else { l.sidebar.right };
+        g.vline(edge, l.sidebar.top, l.sidebar.bottom, self.t.border);
+        self.hits.push((rect(edge - self.s(2), l.sidebar.top, edge + self.s(3), l.sidebar.bottom), Hit::Sash(Sash::Sidebar)));
+        g.text_in(&rect(l.title.left + self.s(20), l.title.top, l.title.right - self.s(80), l.title.bottom), "EXPLORER", self.fonts.cap, self.t.fg, DT_LINE);
+        let bs = self.s(22);
+        let y = l.title.top + (rh(&l.title) - bs) / 2;
+        let mut x = l.title.right - self.s(8) - bs;
+        if self.repo.is_some() {
+            self.icon_button(g, xywh(x, y, bs, bs), '\u{E70E}', Hit::Cmd(Cmd::ExplorerCollapse), true);
+            x -= bs + self.s(2);
+            self.icon_button(g, xywh(x, y, bs, bs), I_REFRESH, Hit::Cmd(Cmd::Refresh), true);
+            x -= bs + self.s(2);
+            self.icon_button(g, xywh(x, y, bs, bs), I_SEARCH, Hit::Cmd(Cmd::GotoFile), true);
+        }
+        let hh = l.explorer_header;
+        self.hits.push((hh, Hit::ExplorerHeader));
+        g.icon(&xywh(hh.left + self.s(2), hh.top, self.s(20), rh(&hh)), I_DOWN, self.fonts.icon_small, self.t.fg);
+        let name = self.repo.as_ref().map(|r| r.name.to_uppercase()).unwrap_or_else(|| "NO FOLDER OPENED".into());
+        g.text_in(&rect(hh.left + self.s(22), hh.top, hh.right - self.s(8), hh.bottom), &name, self.fonts.bold, self.t.fg, DT_LINE);
+        if self.repo.is_none() {
+            let msg = "You have not yet opened a folder.";
+            g.text_in(&xywh(l.sidebar.left + self.s(20), hh.bottom + self.s(10), rw(&l.sidebar) - self.s(40), self.s(20)), msg, self.fonts.ui, self.t.fg_dim, DT_LINE);
+            let b = xywh(l.sidebar.left + self.s(20), hh.bottom + self.s(40), (rw(&l.sidebar) - self.s(40)).min(self.s(300)), self.s(28));
+            let hit = Hit::Welcome(0);
+            g.fill(&b, if self.hover == hit { self.t.accent_hover } else { self.t.accent });
+            g.text_in(&b, "Open Folder", self.fonts.ui, self.t.accent_fg, DT_LINE | DT_CENTER);
+            self.hits.push((b, hit));
+            return;
+        }
+        let r = l.explorer;
+        let rh22 = self.s(22);
+        let saved = g.clip(&r);
+        let scroll = self.scroll[Area::Explorer as usize];
+        let first = (scroll / rh22).max(0) as usize;
+        let n = (rh(&r) / rh22 + 2) as usize;
+        let area_focused = self.main_has_focus() && self.focus == Focus::Explorer;
+        let sel = self.ex.sel_index();
+        // the file shown in the active tab is highlighted too
+        let open_path = match &self.view {
+            MainView::File(f) => Some(f.path.clone()),
+            MainView::Diff(d) => Some(d.path.clone()),
+            _ => None,
+        };
+        let rows: Vec<(usize, crate::explorer::ERow)> = self.ex.rows.iter().cloned().enumerate().skip(first).take(n).collect();
+        for (i, row) in rows {
+            let y = r.top + i as i32 * rh22 - scroll;
+            let rr = rect(r.left, y, r.right, y + rh22);
+            let hovered = self.hover == Hit::ExplorerRow(i);
+            let selected = sel == Some(i) || (sel.is_none() && open_path.as_deref() == Some(row.path.as_str()));
+            self.row_bg(g, &rr, selected, sel == Some(i), hovered, area_focused);
+            self.hits.push((rr, Hit::ExplorerRow(i)));
+            let x0 = rr.left + self.s(8) + row.depth as i32 * self.s(TREE_INDENT);
+            let ignored = self.ex.is_ignored(&row.path);
+            let (color, letter) = if row.dir {
+                match self.ex.dir_deco.get(&row.path) {
+                    Some(k) => (Some(self.kind_color(*k)), Some('\u{2022}')),
+                    None => (None, None),
+                }
+            } else {
+                match self.ex.deco.get(&row.path) {
+                    Some((k, ch)) => (Some(self.kind_color(*k)), Some(*ch)),
+                    None => (None, None),
+                }
+            };
+            let fg = if ignored { self.t.fg_dim } else { color.unwrap_or(self.t.fg) };
+            if row.dir {
+                let open = self.ex.open.contains(&row.path);
+                g.icon(&xywh(x0, y, self.s(16), rh22), if open { I_DOWN } else { I_RIGHT }, self.fonts.icon_small, self.t.fg);
+            } else {
+                g.icon(&xywh(x0 + self.s(18), y, self.s(16), rh22), I_DOC, self.fonts.icon_small, self.t.fg_dim);
+            }
+            let tx = if row.dir { x0 + self.s(20) } else { x0 + self.s(38) };
+            let lw = if letter.is_some() { self.s(24) } else { 0 };
+            g.text_in(&rect(tx, y, rr.right - self.s(10) - lw, y + rh22), &row.name, self.fonts.ui, fg, DT_LINE);
+            if let (Some(ch), Some(c)) = (letter, color) {
+                if !ignored {
+                    g.text_in(&rect(rr.right - self.s(10) - lw, y, rr.right - self.s(10), y + rh22), &ch.to_string(), self.fonts.ui, c, DT_LINE | DT_CENTER);
+                }
+            }
+        }
+        g.unclip(saved);
+        self.draw_scrollbar(g, Area::Explorer);
     }
 
     fn paint_sidebar(&mut self, g: &Gfx) {
@@ -738,7 +850,11 @@ impl App {
     }
 
     fn git_color(&self, f: &git::FileChange) -> u32 {
-        match f.kind {
+        self.kind_color(f.kind)
+    }
+
+    fn kind_color(&self, k: Kind) -> u32 {
+        match k {
             Kind::Modified | Kind::TypeChanged => self.t.git_modified,
             Kind::Added => self.t.git_added,
             Kind::Deleted => self.t.git_deleted,
@@ -1910,7 +2026,7 @@ impl App {
         if self.overlay.is_some() {
             return Some(Area::Pick);
         }
-        for a in [Area::Changes, Area::Branches, Area::Graph, Area::Main, Area::Output] {
+        for a in [Area::Explorer, Area::Changes, Area::Branches, Area::Graph, Area::Main, Area::Output] {
             if a == Area::Output && !self.st.output_visible {
                 continue;
             }
@@ -2116,6 +2232,9 @@ impl App {
                 self.focus = Focus::Main;
                 self.activate_tab(i);
             }
+            Hit::ActivityView(v) => self.set_side_view(v),
+            Hit::ExplorerHeader => {}
+            Hit::ExplorerRow(i) => self.explorer_activate(i, false),
             Hit::TabClose(i) => self.close_tab(i),
             Hit::BranchesHeader => self.toggle_branches_section(),
             Hit::GraphHeader => self.toggle_graph_section(),
@@ -2264,6 +2383,7 @@ impl App {
         match self.hit_test(x, y) {
             // like VS Code: the first click opened a preview tab, the double click keeps it open
             Hit::FileRow(_) | Hit::GraphRow(_) | Hit::Tab(_) => self.pin_tab(self.tab_active),
+            Hit::ExplorerRow(i) if self.ex.rows.get(i).map(|r| !r.dir).unwrap_or(false) => self.pin_tab(self.tab_active),
             Hit::CommitFile(i) => {
                 self.open_commit_file(i);
                 self.pin_tab(self.tab_active);
@@ -2415,6 +2535,18 @@ impl App {
         }
         if let Hit::Tab(i) | Hit::TabClose(i) = hit {
             let items = self.tab_menu(i, &mut m);
+            self.show_menu(x, y, items, m);
+            return;
+        }
+        if self.repo.is_some() && (contains(&self.l.explorer, x, y) || contains(&self.l.explorer_header, x, y)) {
+            let i = match hit {
+                Hit::ExplorerRow(i) => {
+                    self.explorer_select(i);
+                    i
+                }
+                _ => usize::MAX,
+            };
+            let items = self.explorer_menu(i, &mut m);
             self.show_menu(x, y, items, m);
             return;
         }
@@ -2604,6 +2736,8 @@ impl App {
             (0xC0, true, false) => Some(Cmd::ToggleTerminal),                // Ctrl+`
             (0x4D, true, true) => Some(Cmd::TogglePanelMax),                 // Ctrl+Shift+M
             (0x42, true, false) => Some(Cmd::ToggleSidebar),                 // Ctrl+B
+            (0x45, true, true) => Some(Cmd::ShowExplorer),                   // Ctrl+Shift+E
+            (0x50, true, false) => Some(Cmd::GotoFile),                      // Ctrl+P
             (0x57, true, false) | (0x73, true, false) => Some(Cmd::CloseEditor), // Ctrl+W, Ctrl+F4
             (0x09, true, false) | (0x22, true, false) => Some(Cmd::NextEditor), // Ctrl+Tab, Ctrl+PageDown
             (0x09, true, true) | (0x21, true, false) => Some(Cmd::PrevEditor), // Ctrl+Shift+Tab, Ctrl+PageUp
@@ -2705,6 +2839,8 @@ impl App {
         match vk {
             0x09 => {
                 self.focus = match self.focus {
+                    _ if self.st.sidebar_visible && self.st.side_view == 1 => if self.focus == Focus::Explorer { Focus::Main } else { Focus::Explorer },
+                    Focus::Explorer => Focus::Changes,
                     // visual order, skipping collapsed sections
                     Focus::Changes if self.st.graph_open => Focus::Graph,
                     Focus::Changes | Focus::Graph if self.st.branches_open => Focus::Branches,
@@ -2716,6 +2852,7 @@ impl App {
             _ => match self.focus {
                 Focus::Changes => self.changes_key(vk, ctrl, shift),
                 Focus::Branches => self.branches_key(vk),
+                Focus::Explorer => self.explorer_key(vk),
                 Focus::Graph => self.graph_key(vk),
                 Focus::Main => self.main_key(vk, ctrl),
                 Focus::Terminal => {}
@@ -2793,6 +2930,51 @@ impl App {
                 self.discard(files);
             }
             _ => {}
+        }
+    }
+
+    fn explorer_key(&mut self, vk: u16) {
+        let n = self.ex.rows.len();
+        if n == 0 || !self.explorer_active() {
+            return;
+        }
+        let cur = self.ex.sel_index();
+        let c = cur.unwrap_or(0);
+        let next = match vk {
+            0x26 => Some(c.saturating_sub(1)),
+            0x28 => Some(if cur.is_none() { 0 } else { (c + 1).min(n - 1) }),
+            0x24 => Some(0),
+            0x23 => Some(n - 1),
+            0x21 => Some(c.saturating_sub(10)),
+            0x22 => Some((c + 10).min(n - 1)),
+            _ => None,
+        };
+        if let Some(i) = next {
+            self.explorer_select(i);
+            self.reveal_row(Area::Explorer, i);
+            return;
+        }
+        match vk {
+            // Enter opens a file in a kept tab, Space in the preview tab
+            0x0D => self.explorer_activate(c, true),
+            0x20 => self.explorer_activate(c, false),
+            // Left: collapse an open folder, otherwise jump to the parent folder
+            0x25 => {
+                let row = self.ex.rows[c].clone();
+                if row.dir && self.ex.open.contains(&row.path) {
+                    self.toggle_explorer_dir(c, Some(false));
+                } else if let Some((parent, _)) = row.path.rsplit_once('/') {
+                    if let Some(p) = self.ex.rows.iter().position(|r| r.path == parent) {
+                        self.explorer_select(p);
+                        self.reveal_row(Area::Explorer, p);
+                    }
+                }
+            }
+            0x27 => self.toggle_explorer_dir(c, Some(true)),
+            _ => {}
+        }
+        if let Some(i) = self.ex.sel_index() {
+            self.reveal_row(Area::Explorer, i);
         }
     }
 

@@ -88,6 +88,7 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
   - Kill / clear / rename terminal. It is restored on startup if it was open, and pressing any key after the shell exits restarts it.
   - Panel size: the maximize button in the panel header (or `Ctrl+Shift+M`) toggles between the normal size and a maximized mode, and the "..." button (or right-clicking the header) picks the mode: Normal, Full Width (spans under the side bar too), Full Height (fills the main area) or Full Screen (covers everything but the status bar). The last maximized mode is remembered.
   - Started lazily: no shell process exists until you open the terminal. With it open and idle the app still uses 0 ms CPU and about 2.7 MB of private memory; the shell's own memory is separate (cmd ~6 MB, bash ~8 MB, Windows PowerShell ~80 MB).
+- **Explorer and file viewer:** the Explorer view (top icon of the activity bar, or `Ctrl+Shift+E`) shows the repository's folder tree with git status colors and letters, folders that contain changes marked with a dot, and ignored files dimmed. Click a folder to expand it; click a file to view it in a read-only text viewer tab (double-click or Enter keeps the tab). The viewer shows UTF-8 and UTF-16 text with line numbers and reloads when the file changes on disk; binary files and files over 16 MB show a message instead. Right-click for Open, Open Changes, Open with Default App, Reveal in File Explorer, Copy Path and Copy Relative Path. *Go to File...* (`Ctrl+P`) picks any tracked or untracked file by name.
 - **Editor tabs:** diffs, files and commits open in tabs, like VS Code. A single click opens a preview tab (italic title) that the next click replaces; double-clicking the file or commit, double-clicking the tab, or *Keep Open* pins it so it stays. Opening something that already has a tab switches to it. Close a tab with its × button, a middle click, `Ctrl+W` or `Ctrl+F4`; right-click a tab for Close, Close Others, Close to the Right, Close All, Keep Open and Copy Path. Background tabs of working tree changes are refreshed when you switch back to them.
 - **Workbench:** command palette (`Ctrl+Shift+P`), quick pick and input overlays, dialogs, toasts with "Open Git Log", an Output panel with every git command, and a status bar showing branch, sync and in-progress state. Dark and light themes (the native title bar and popup menus follow the theme), a side bar that can sit on the left or the right (*View: Toggle Primary Side Bar Position*, or right-click the activity bar) and can be hidden to give the diff more room (`Ctrl+B`, or click the Source Control icon in the activity bar), per-monitor DPI, and a recent folders list.
 
@@ -109,6 +110,8 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
 | `Backspace` (diff) | Back to commit |
 | `Del` (changes) | Discard |
 | `Ctrl+B` | Toggle side bar |
+| `Ctrl+Shift+E` | Show Explorer |
+| `Ctrl+P` | Go to file |
 | `Ctrl+W` / `Ctrl+F4` | Close editor tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab`, `Ctrl+PageDown` / `Ctrl+PageUp` | Next / previous editor tab |
 | `Ctrl+O` / `Ctrl+R` / `Ctrl+Shift+N` | Open folder / recent / new window |
@@ -134,6 +137,7 @@ src/graph.rs     swimlane graph layout
 src/term.rs      ConPTY backend + VT/xterm emulator
 src/term_ui.rs   terminal panel: input, selection, painting
 src/tabs.rs      editor tabs (preview / pinned, open, switch, close)
+src/explorer.rs  Explorer view (folder tree) and the read-only text file viewer
 src/cli.rs       command line parsing / path resolution
 src/watch.rs     ReadDirectoryChangesW watcher
 src/win.rs       Win32/GDI helpers (fonts, drawing, menus, clipboard, dark mode)

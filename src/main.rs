@@ -8,6 +8,7 @@ mod app;
 mod branches;
 mod cli;
 mod diff;
+mod explorer;
 mod git;
 mod graph;
 mod settings;
