@@ -1,6 +1,6 @@
 [package]
 name = "gitgui"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Ultra-light native Windows Git client modeled on the VS Code Source Control experience"
 license = "MIT"

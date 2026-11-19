@@ -10,9 +10,19 @@ pub struct Settings {
     pub sidebar_w: i32,
     /// Activity bar and side bar on the right edge (VS Code "Toggle Primary Side Bar Position").
     pub sidebar_right: bool,
+    /// Primary side bar shown (VS Code "Toggle Primary Side Bar Visibility", Ctrl+B).
+    pub sidebar_visible: bool,
     /// Show the Changes list as a folder tree (VS Code "View as Tree").
     pub tree_view: bool,
     pub graph_split: f32,
+    /// Branches section expanded, and its list height (unscaled pixels).
+    pub branches_open: bool,
+    /// Graph section expanded.
+    pub graph_open: bool,
+    /// Bottom panel size (`PanelMode` as u8) and the maximized mode the toggle button restores.
+    pub panel_mode: u8,
+    pub panel_max: u8,
+    pub branches_h: i32,
     pub output_h: i32,
     pub output_visible: bool,
     pub graph_all: bool,
@@ -32,8 +42,14 @@ impl Default for Settings {
             compact_diff: false,
             sidebar_w: 320,
             sidebar_right: false,
+            sidebar_visible: true,
             tree_view: false,
             graph_split: 0.55,
+            branches_open: true,
+            graph_open: true,
+            panel_mode: 0,
+            panel_max: 2,
+            branches_h: 140,
             output_h: 180,
             output_visible: false,
             graph_all: false,
@@ -65,8 +81,14 @@ impl Settings {
                 "compact_diff" => s.compact_diff = b,
                 "sidebar_w" => s.sidebar_w = v.parse().unwrap_or(320).clamp(180, 2000),
                 "sidebar_right" => s.sidebar_right = b,
+                "sidebar_visible" => s.sidebar_visible = b,
                 "tree_view" => s.tree_view = b,
                 "graph_split" => s.graph_split = v.parse().unwrap_or(0.55f32).clamp(0.1, 0.9),
+                "branches_open" => s.branches_open = b,
+                "graph_open" => s.graph_open = b,
+                "panel_mode" => s.panel_mode = v.parse().unwrap_or(0).min(3),
+                "panel_max" => s.panel_max = v.parse().unwrap_or(2).clamp(1, 3),
+                "branches_h" => s.branches_h = v.parse().unwrap_or(140).clamp(44, 2000),
                 "output_h" => s.output_h = v.parse().unwrap_or(180).clamp(60, 2000),
                 "output_visible" => s.output_visible = b,
                 "graph_all" => s.graph_all = b,
@@ -99,8 +121,14 @@ impl Settings {
         out += &format!("compact_diff={}\n", b(self.compact_diff));
         out += &format!("sidebar_w={}\n", self.sidebar_w);
         out += &format!("sidebar_right={}\n", b(self.sidebar_right));
+        out += &format!("sidebar_visible={}\n", b(self.sidebar_visible));
         out += &format!("tree_view={}\n", b(self.tree_view));
         out += &format!("graph_split={}\n", self.graph_split);
+        out += &format!("branches_open={}\n", b(self.branches_open));
+        out += &format!("graph_open={}\n", b(self.graph_open));
+        out += &format!("panel_mode={}\n", self.panel_mode);
+        out += &format!("panel_max={}\n", self.panel_max);
+        out += &format!("branches_h={}\n", self.branches_h);
         out += &format!("output_h={}\n", self.output_h);
         out += &format!("output_visible={}\n", b(self.output_visible));
         out += &format!("graph_all={}\n", b(self.graph_all));

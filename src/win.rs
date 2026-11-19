@@ -43,8 +43,12 @@ pub fn rh(r: &RECT) -> i32 {
 }
 
 pub fn create_font(height: i32, weight: i32, face: &str) -> HFONT {
+    create_font_ex(height, weight, false, face)
+}
+
+pub fn create_font_ex(height: i32, weight: i32, italic: bool, face: &str) -> HFONT {
     let f = wz(face);
-    unsafe { CreateFontW(-height, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET as _, OUT_DEFAULT_PRECIS as _, CLIP_DEFAULT_PRECIS as _, CLEARTYPE_QUALITY as _, (DEFAULT_PITCH | FF_DONTCARE) as _, f.as_ptr()) }
+    unsafe { CreateFontW(-height, 0, 0, 0, weight, italic as u32, 0, 0, DEFAULT_CHARSET as _, OUT_DEFAULT_PRECIS as _, CLIP_DEFAULT_PRECIS as _, CLEARTYPE_QUALITY as _, (DEFAULT_PITCH | FF_DONTCARE) as _, f.as_ptr()) }
 }
 
 pub fn font_exists(face: &str) -> bool {
@@ -69,6 +73,8 @@ pub fn font_exists(face: &str) -> bool {
 
 pub struct Fonts {
     pub ui: HFONT,
+    /// Italic UI font (preview tabs).
+    pub ui_italic: HFONT,
     pub bold: HFONT,
     pub small: HFONT,
     pub mono: HFONT,
@@ -103,6 +109,7 @@ impl Fonts {
             mono_small,
             mono_small_h: s(17.0),
             ui: create_font(s(13.0), 400, "Segoe UI"),
+            ui_italic: create_font_ex(s(13.0), 400, true, "Segoe UI"),
             bold: create_font(s(11.0), 700, "Segoe UI"),
             small: create_font(s(12.0), 400, "Segoe UI"),
             mono,
@@ -119,7 +126,7 @@ impl Fonts {
 impl Drop for Fonts {
     fn drop(&mut self) {
         unsafe {
-            for f in [self.ui, self.bold, self.small, self.mono, self.icon, self.icon_small, self.big, self.cap, self.mono_small, self.icon_big] {
+            for f in [self.ui, self.ui_italic, self.bold, self.small, self.mono, self.icon, self.icon_small, self.big, self.cap, self.mono_small, self.icon_big] {
                 DeleteObject(f as HGDIOBJ);
             }
         }

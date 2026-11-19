@@ -8,6 +8,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::*;
+use crate::branches::{self, BRow};
 use crate::diff::LK;
 use crate::git::{self, Group, Kind, RefKind};
 use crate::graph::{self, Seg};
@@ -112,45 +113,156 @@ impl App {
         let ax = if right { w - ab } else { 0 };
         let sx = if right { w - ab - sw } else { ab };
         let mut l = Layout::default();
+        let mode = self.panel_mode();
+        let out_h = if self.st.output_visible { self.s(self.st.output_h).clamp(self.s(80), (h - sb - self.s(150)).max(self.s(80))) } else { 0 };
+        // a full width panel runs under the activity bar and the side bar too
+        let side_bottom = if mode == PanelMode::FullWidth { h - sb - out_h } else { h - sb };
         l.status = rect(0, h - sb, w, h);
-        l.activity = rect(ax, 0, ax + ab, h - sb);
-        l.sidebar = rect(sx, 0, sx + sw, h - sb);
+        l.activity = rect(ax, 0, ax + ab, side_bottom);
+        l.sidebar = rect(sx, 0, sx + sw, side_bottom);
         l.title = rect(sx, 0, sx + sw, self.s(35));
-        // sidebar sections
+        // sidebar sections, top to bottom: Changes, Graph, Branches. Changes and Graph share
+        // the flexible space (graph_split); Branches keeps its own height at the bottom.
         let avail_top = l.title.bottom;
-        let avail_h = l.sidebar.bottom - avail_top;
-        let split = avail_top + ((avail_h as f32) * self.st.graph_split) as i32;
-        let split = split.clamp(avail_top + self.s(150), (l.sidebar.bottom - self.s(80)).max(avail_top + self.s(150)));
+        let hdr = self.s(22);
+        let bottom = l.sidebar.bottom;
         l.changes_header = rect(sx, avail_top, sx + sw, avail_top + self.s(22));
         let edit_h = self.edit_lines * self.s(18) + self.s(8);
         l.edit = rect(sx + self.s(20), l.changes_header.bottom + self.s(4), sx + sw - self.s(12), l.changes_header.bottom + self.s(4) + edit_h);
         let has_button = self.repo.is_some();
         l.button = if has_button { rect(l.edit.left, l.edit.bottom + self.s(6), l.edit.right, l.edit.bottom + self.s(6) + self.s(28)) } else { rect(l.edit.left, l.edit.bottom, l.edit.right, l.edit.bottom) };
-        l.changes = rect(sx, l.button.bottom + self.s(6), sx + sw, split);
-        l.graph_header = rect(sx, split, sx + sw, split + self.s(22));
-        l.graph = rect(sx, l.graph_header.bottom, sx + sw, l.sidebar.bottom);
-        // main area, with a 1px border between it and the side bar
-        let (mx, mr) = if right { (0, l.sidebar.left - 1) } else { (l.sidebar.right + 1, w) };
-        let out_h = if self.st.output_visible { self.s(self.st.output_h).clamp(self.s(80), (h - sb - self.s(150)).max(self.s(80))) } else { 0 };
+        // Changes keeps room for about three rows below the commit button
+        let changes_min = l.button.bottom + self.s(6) + self.s(66);
+        let graph_min = if self.st.graph_open { self.s(80) } else { 0 };
+        let br_h = if self.st.branches_open { self.s(self.st.branches_h).max(self.s(44)) } else { 0 };
+        let br_h = br_h.min((bottom - hdr * 2 - graph_min - changes_min).max(0));
+        l.branches_header = rect(sx, bottom - br_h - hdr, sx + sw, bottom - br_h);
+        l.branches = rect(sx, l.branches_header.bottom, sx + sw, bottom);
+        if self.st.graph_open {
+            let flex = (l.branches_header.top - avail_top - hdr).max(0);
+            let split = avail_top + (flex as f32 * self.st.graph_split) as i32;
+            let split = split.clamp(changes_min, (l.branches_header.top - hdr - graph_min).max(changes_min));
+            l.graph_header = rect(sx, split, sx + sw, split + hdr);
+            l.graph = rect(sx, l.graph_header.bottom, sx + sw, l.branches_header.top.max(l.graph_header.bottom));
+        } else {
+            l.graph_header = rect(sx, l.branches_header.top - hdr, sx + sw, l.branches_header.top);
+            l.graph = rect(sx, l.graph_header.bottom, sx + sw, l.graph_header.bottom);
+        }
+        l.changes = rect(sx, l.button.bottom + self.s(6), sx + sw, l.graph_header.top.max(l.button.bottom + self.s(6)));
+        // main area, with a 1px border between it and the side bar; a hidden side bar
+        // gives its space to the main area (the activity bar stays)
+        let side = self.st.sidebar_visible;
+        let (mx, mr) = match (side, right) {
+            (true, true) => (0, l.sidebar.left - 1),
+            (true, false) => (l.sidebar.right + 1, w),
+            (false, true) => (0, l.activity.left),
+            (false, false) => (l.activity.right, w),
+        };
+        if !side {
+            let z = rect(0, 0, 0, 0);
+            (l.sidebar, l.title, l.changes_header, l.edit, l.button, l.changes) = (z, z, z, z, z, z);
+            (l.graph_header, l.graph, l.branches_header, l.branches) = (z, z, z, z);
+        }
         l.main = rect(mx, 0, mr, h - sb - out_h);
-        l.main_header = rect(mx, 0, mr, self.s(35));
-        l.main_body = rect(mx, l.main_header.bottom, mr, l.main.bottom);
         l.output = rect(mx, l.main.bottom, mr, h - sb);
-        l.output_body = rect(mx, l.output.top + self.s(35), mr, l.output.bottom);
+        match mode {
+            PanelMode::Normal => {}
+            PanelMode::FullWidth => l.output = rect(0, h - sb - out_h, w, h - sb),
+            PanelMode::FullHeight => {
+                l.main = rect(mx, 0, mr, 0);
+                l.output = rect(mx, 0, mr, h - sb);
+            }
+            PanelMode::FullScreen => {
+                let z = rect(0, 0, 0, 0);
+                l.main = z;
+                l.output = rect(0, 0, w, h - sb);
+                (l.activity, l.sidebar, l.title, l.changes_header, l.edit, l.button, l.changes) = (z, z, z, z, z, z, z);
+                (l.graph_header, l.graph, l.branches_header, l.branches) = (z, z, z, z);
+            }
+        }
+        l.main_header = rect(l.main.left, 0, l.main.right, self.s(35).min(l.main.bottom));
+        l.main_body = rect(l.main.left, l.main_header.bottom, l.main.right, l.main.bottom);
+        l.output_body = rect(l.output.left, l.output.top + self.s(35), l.output.right, l.output.bottom);
         self.l = l;
         unsafe {
-            let show = self.repo.is_some();
+            let show = self.repo.is_some() && mode != PanelMode::FullScreen && side;
             ShowWindow(self.commit_edit, if show { SW_SHOW } else { SW_HIDE });
             let pad_x = self.s(6);
             let pad_y = self.s(4);
             MoveWindow(self.commit_edit, l.edit.left + pad_x, l.edit.top + pad_y, (rw(&l.edit) - pad_x * 2).max(10), (rh(&l.edit) - pad_y * 2).max(10), 1);
         }
-        for a in [Area::Changes, Area::Graph, Area::Main, Area::Output] {
+        for a in [Area::Changes, Area::Branches, Area::Graph, Area::Main, Area::Output] {
             self.clamp_scroll(a);
         }
         self.resize_terminal();
         self.layout_overlay_edit();
         self.invalidate();
+    }
+
+    /// Shows / hides the primary side bar (the activity bar stays).
+    pub fn set_sidebar_visible(&mut self, visible: bool) {
+        self.st.sidebar_visible = visible;
+        if !visible && matches!(self.focus, Focus::Changes | Focus::Graph | Focus::Branches) {
+            self.focus = Focus::Main;
+            unsafe {
+                if GetFocus() == self.commit_edit {
+                    SetFocus(self.hwnd);
+                }
+            }
+        }
+        self.st.save();
+        self.layout();
+    }
+
+    /// Effective panel size mode (Normal while the panel is hidden).
+    pub fn panel_mode(&self) -> PanelMode {
+        if self.st.output_visible { PanelMode::from_u8(self.st.panel_mode) } else { PanelMode::Normal }
+    }
+
+    /// Sets the panel size mode; a maximized mode is remembered for the maximize toggle.
+    pub fn set_panel_mode(&mut self, m: PanelMode) {
+        if m != PanelMode::Normal {
+            self.st.panel_max = m as u8;
+        }
+        self.st.panel_mode = m as u8;
+        // the lists may be covered now, so keys go to the terminal
+        if m != PanelMode::Normal && self.st.panel_terminal && self.focus != Focus::Terminal {
+            self.focus = Focus::Terminal;
+            unsafe {
+                SetFocus(self.hwnd);
+            }
+        }
+        if !self.st.output_visible {
+            self.st.output_visible = true;
+            if self.st.panel_terminal && self.terms.is_empty() {
+                self.st.save();
+                self.show_terminal(true);
+                return;
+            }
+        }
+        self.st.save();
+        self.layout();
+    }
+
+    /// Maximize / restore button: toggles between the normal size and the last maximized mode.
+    pub fn toggle_panel_max(&mut self) {
+        let m = if self.panel_mode() != PanelMode::Normal {
+            PanelMode::Normal
+        } else {
+            match PanelMode::from_u8(self.st.panel_max) {
+                PanelMode::Normal => PanelMode::FullHeight,
+                x => x,
+            }
+        };
+        self.set_panel_mode(m);
+    }
+
+    pub fn panel_size_menu(&mut self, m: &mut Menu) -> Vec<MenuItem> {
+        let cur = self.panel_mode();
+        [(PanelMode::Normal, "Normal Size"), (PanelMode::FullWidth, "Full Width"), (PanelMode::FullHeight, "Full Height (Maximized)"), (PanelMode::FullScreen, "Full Screen")]
+            .into_iter()
+            .map(|(pm, label)| m.check(label, cur == pm, move |a| a.set_panel_mode(pm)))
+            .collect()
     }
 
     pub fn edit_changed(&mut self) {
@@ -209,6 +321,7 @@ impl App {
         match a {
             Area::Changes => self.l.changes,
             Area::Graph => self.l.graph,
+            Area::Branches => self.l.branches,
             Area::Main => self.l.main_body,
             Area::Output => self.l.output_body,
             Area::Pick => {
@@ -230,6 +343,7 @@ impl App {
         let rh22 = self.s(22);
         match a {
             Area::Changes => self.crows.len() as i32 * rh22,
+            Area::Branches => self.brows.len() as i32 * rh22,
             Area::Graph => (self.commits.len() as i32 + if self.has_more { 1 } else { 0 }) * rh22,
             Area::Main => match &self.view {
                 MainView::Diff(d) => d.rows.len() as i32 * self.line_h() + self.s(8),
@@ -310,9 +424,16 @@ impl App {
         let g = Gfx { dc: self.buf.0 };
         self.hits.clear();
         g.fill(&c, self.t.editor);
-        self.paint_activity(&g);
-        self.paint_sidebar(&g);
-        self.paint_main(&g);
+        let mode = self.panel_mode();
+        if mode != PanelMode::FullScreen {
+            self.paint_activity(&g);
+            if self.st.sidebar_visible {
+                self.paint_sidebar(&g);
+            }
+        }
+        if !matches!(mode, PanelMode::FullHeight | PanelMode::FullScreen) {
+            self.paint_main(&g);
+        }
         if self.st.output_visible {
             self.paint_output(&g);
         }
@@ -395,11 +516,17 @@ impl App {
         let right = self.st.sidebar_right;
         g.vline(if right { r.left } else { r.right - 1 }, r.top, r.bottom, self.t.border);
         let inner = if right { rect(r.left + 1, r.top, r.right, r.bottom) } else { rect(r.left, r.top, r.right - 1, r.bottom) };
-        // source control item (active)
+        // source control item: like VS Code, clicking it shows / hides the side bar
         let item = xywh(inner.left, inner.top, rw(&inner), self.s(48));
-        let stripe = if right { rect(item.right - self.s(2), item.top, item.right, item.bottom) } else { rect(item.left, item.top, item.left + self.s(2), item.bottom) };
-        g.fill(&stripe, self.t.accent);
-        draw_branch_icon(g, item.left + rw(&item) / 2, item.top + rh(&item) / 2, self.s(24), self.t.fg_strong, self.scale);
+        let visible = self.st.sidebar_visible;
+        if visible {
+            let stripe = if right { rect(item.right - self.s(2), item.top, item.right, item.bottom) } else { rect(item.left, item.top, item.left + self.s(2), item.bottom) };
+            g.fill(&stripe, self.t.accent);
+        }
+        let hit = Hit::Cmd(Cmd::ToggleSidebar);
+        let icon_fg = if visible || self.hover == hit { self.t.fg_strong } else { self.t.fg_dim };
+        draw_branch_icon(g, item.left + rw(&item) / 2, item.top + rh(&item) / 2, self.s(24), icon_fg, self.scale);
+        self.hits.push((item, hit));
         let count = self.repo.as_ref().map(|r| r.status.files.len()).unwrap_or(0);
         if count > 0 || !self.ops.is_empty() {
             let label = if !self.ops.is_empty() { "\u{2026}".to_string() } else if count > 999 { "999+".into() } else { count.to_string() };
@@ -464,8 +591,14 @@ impl App {
         // graph
         let gh = l.graph_header;
         g.hline(gh.left, gh.right, gh.top, self.t.border);
-        self.hits.push((rect(gh.left, gh.top - self.s(2), gh.right, gh.top + self.s(3)), Hit::Sash(Sash::Graph)));
-        g.icon(&xywh(gh.left + self.s(2), gh.top, self.s(20), rh(&gh)), I_DOWN, self.fonts.icon_small, self.t.fg);
+        self.hits.push((gh, Hit::GraphHeader));
+        // Changes / Graph boundary: resizes Changes vs Graph, or (Graph collapsed) the Branches list
+        if self.st.graph_open {
+            self.hits.push((rect(gh.left, gh.top - self.s(2), gh.right, gh.top + self.s(3)), Hit::Sash(Sash::Graph)));
+        } else if self.st.branches_open {
+            self.hits.push((rect(gh.left, gh.top - self.s(2), gh.right, gh.top + self.s(3)), Hit::Sash(Sash::Branches)));
+        }
+        g.icon(&xywh(gh.left + self.s(2), gh.top, self.s(20), rh(&gh)), if self.st.graph_open { I_DOWN } else { I_RIGHT }, self.fonts.icon_small, self.t.fg);
         g.text_in(&rect(gh.left + self.s(22), gh.top, gh.right - self.s(150), gh.bottom), "GRAPH", self.fonts.bold, self.t.fg, DT_LINE);
         if self.repo.is_some() {
             let bs = self.s(22);
@@ -480,8 +613,11 @@ impl App {
             self.icon_button(g, xywh(x, y, bs, bs), I_CLOUD, Hit::Cmd(Cmd::FetchAll), true);
             let label = if self.st.graph_all { "All" } else { "Auto" };
             self.text_button(g, x - self.s(2), y + self.s(1), bs - self.s(2), label, Hit::Cmd(Cmd::ToggleGraphAll));
-            self.paint_graph(g);
+            if self.st.graph_open {
+                self.paint_graph(g);
+            }
         }
+        self.paint_branches_section(g);
     }
 
     fn paint_welcome(&mut self, g: &Gfx) {
@@ -736,6 +872,119 @@ impl App {
         self.draw_scrollbar(g, Area::Changes);
     }
 
+    /// BRANCHES header (collapsible, resizable) and, when open, the branch list.
+    fn paint_branches_section(&mut self, g: &Gfx) {
+        let bh = self.l.branches_header;
+        g.hline(bh.left, bh.right, bh.top, self.t.border);
+        self.hits.push((bh, Hit::BranchesHeader));
+        // Graph / Branches boundary resizes the Branches list
+        if self.st.branches_open && self.st.graph_open {
+            self.hits.push((rect(bh.left, bh.top - self.s(2), bh.right, bh.top + self.s(3)), Hit::Sash(Sash::Branches)));
+        }
+        let open = self.st.branches_open;
+        g.icon(&xywh(bh.left + self.s(2), bh.top, self.s(20), rh(&bh)), if open { I_DOWN } else { I_RIGHT }, self.fonts.icon_small, self.t.fg);
+        g.text_in(&rect(bh.left + self.s(22), bh.top, bh.right - self.s(80), bh.bottom), "BRANCHES", self.fonts.bold, self.t.fg, DT_LINE);
+        if self.repo.is_none() {
+            return;
+        }
+        let bs = self.s(22);
+        let mut x = bh.right - self.s(8) - bs;
+        self.icon_button(g, xywh(x, bh.top, bs, bs), I_ADD, Hit::Cmd(Cmd::Branch), true);
+        x -= bs;
+        self.icon_button(g, xywh(x, bh.top, bs, bs), I_TAG, Hit::Cmd(Cmd::TagCreate), true);
+        if open {
+            self.paint_branches(g);
+        }
+    }
+
+    fn paint_branches(&mut self, g: &Gfx) {
+        let r = self.l.branches;
+        if rh(&r) <= 0 {
+            return;
+        }
+        let rh22 = self.s(22);
+        let saved = g.clip(&r);
+        let scroll = self.scroll[Area::Branches as usize];
+        let first = (scroll / rh22).max(0) as usize;
+        let n = (rh(&r) / rh22 + 2) as usize;
+        let area_focused = self.main_has_focus() && self.focus == Focus::Branches;
+        let sel = self.branch_sel_index();
+        let cur = self.status().and_then(|s| s.branch.clone());
+        let rows: Vec<(usize, BRow)> = self.brows.iter().cloned().enumerate().skip(first).take(n).collect();
+        for (i, row) in rows {
+            let y = r.top + i as i32 * rh22 - scroll;
+            let rr = rect(r.left, y, r.right, y + rh22);
+            let hovered = self.hover == Hit::BranchRow(i);
+            self.row_bg(g, &rr, sel == Some(i), sel == Some(i), hovered, area_focused);
+            self.hits.push((rr, Hit::BranchRow(i)));
+            match row {
+                BRow::Group { key, label, count } => {
+                    let col = self.collapsed_bgroups.contains(&key);
+                    g.icon(&xywh(rr.left + self.s(4), y, self.s(16), rh22), if col { I_RIGHT } else { I_DOWN }, self.fonts.icon_small, self.t.fg);
+                    let ix = rr.left + self.s(22);
+                    if key == "local" {
+                        draw_branch_icon(g, ix + self.s(8), y + rh22 / 2, self.s(14), self.t.fg_dim, self.scale);
+                    } else {
+                        g.icon(&xywh(ix, y, self.s(16), rh22), if key == "tags" { I_TAG } else { I_CLOUD }, self.fonts.icon_small, self.t.fg_dim);
+                    }
+                    let cs = count.to_string();
+                    let bw = g.text_w(&cs, self.fonts.cap).max(self.s(6)) + self.s(12);
+                    let badge = xywh(rr.right - self.s(12) - bw, y + self.s(2), bw, self.s(18));
+                    g.round_rect(&badge, self.s(18), self.t.badge_bg, None);
+                    g.text_in(&badge, &cs, self.fonts.cap, self.t.badge_fg, DT_LINE | DT_CENTER);
+                    g.text_in(&rect(ix + self.s(22), y, badge.left - self.s(6), y + rh22), &label, self.fonts.ui, self.t.fg, DT_LINE);
+                }
+                BRow::Ref(ri) => {
+                    let Some(rf) = self.repo.as_ref().and_then(|r| r.refs.get(ri)).cloned() else { continue };
+                    let is_cur = rf.kind == RefKind::Head && Some(&rf.name) == cur.as_ref();
+                    let ix = rr.left + self.s(40);
+                    let icol = if is_cur { self.t.ref_color } else { self.t.fg_dim };
+                    match rf.kind {
+                        RefKind::Head => draw_branch_icon(g, ix + self.s(8), y + rh22 / 2, self.s(14), icol, self.scale),
+                        RefKind::Remote => g.icon(&xywh(ix, y, self.s(16), rh22), I_CLOUD, self.fonts.icon_small, icol),
+                        RefKind::Tag => g.icon(&xywh(ix, y, self.s(16), rh22), I_TAG, self.fonts.icon_small, icol),
+                    }
+                    // remote branches are listed under their remote, so drop the "origin/" prefix
+                    let label = match rf.kind {
+                        RefKind::Remote => {
+                            let remotes = self.status().map(|s| s.remotes.clone()).unwrap_or_default();
+                            branches::split_remote(&remotes, &rf.name).1
+                        }
+                        _ => rf.name.clone(),
+                    };
+                    // right side: check mark for the current branch, tracking state
+                    let mut right = rr.right - self.s(12);
+                    if is_cur {
+                        g.icon(&xywh(right - self.s(16), y, self.s(16), rh22), I_CHECK, self.fonts.icon_small, self.t.fg);
+                        right -= self.s(20);
+                    }
+                    if rf.kind == RefKind::Head {
+                        let tl = branches::track_label(&rf.track);
+                        if !tl.is_empty() {
+                            let tw = g.text_w(&tl, self.fonts.small);
+                            g.text_in(&rect(right - tw, y, right, y + rh22), &tl, self.fonts.small, if rf.track == "gone" { self.t.git_deleted } else { self.t.fg }, DT_LINE);
+                            right -= tw + self.s(8);
+                        }
+                    }
+                    let tx = ix + self.s(22);
+                    let font = if is_cur { self.fonts.bold } else { self.fonts.ui };
+                    let nw = g.text_w(&label, font);
+                    g.text_in(&rect(tx, y, right, y + rh22), &label, font, self.t.fg, DT_LINE);
+                    // description: upstream for local branches, commit subject otherwise
+                    let desc = match (&rf.kind, &rf.upstream) {
+                        (RefKind::Head, Some(u)) => u.clone(),
+                        _ => rf.subject.clone(),
+                    };
+                    if tx + nw + self.s(8) < right {
+                        g.text_in(&rect(tx + nw + self.s(8), y, right, y + rh22), &desc, self.fonts.small, self.t.fg_dim, DT_LINE);
+                    }
+                }
+            }
+        }
+        g.unclip(saved);
+        self.draw_scrollbar(g, Area::Branches);
+    }
+
     fn paint_graph(&mut self, g: &Gfx) {
         let r = self.l.graph;
         let rh22 = self.s(22);
@@ -841,31 +1090,20 @@ impl App {
     fn paint_main(&mut self, g: &Gfx) {
         let l = self.l;
         g.fill(&l.main, self.t.editor);
-        // header (tab-like)
+        // header: editor tabs on the left, actions of the active view on the right
         let hd = l.main_header;
         g.fill(&hd, self.t.sidebar);
         g.hline(hd.left, hd.right, hd.bottom - 1, self.t.border);
-        let (title, desc) = match &self.view {
-            MainView::Diff(d) => (d.title.clone(), d.desc.clone()),
-            MainView::File(f) => (f.title.clone(), f.path.clone()),
-            MainView::Commit(c) => (format!("{} ({})", c.commit.subject(), &c.commit.hash[..8]), if c.stash.is_some() { "Stash".into() } else { "Commit".into() }),
-            MainView::Message(t, _) => (t.clone(), String::new()),
-            MainView::Loading(t) => (t.clone(), "Loading...".into()),
-            MainView::Empty => (String::new(), String::new()),
-        };
-        if !title.is_empty() {
-            let tw = g.text_w(&title, self.fonts.ui) + self.s(44);
-            let tab = rect(hd.left, hd.top, (hd.left + tw).min(hd.right - self.s(200)), hd.bottom);
-            g.fill(&tab, self.t.editor);
-            g.hline(tab.left, tab.right, tab.top, self.t.accent);
-            g.vline(tab.right, tab.top, tab.bottom, self.t.border);
-            g.icon(&xywh(tab.left + self.s(8), tab.top, self.s(18), rh(&tab)), I_DOC, self.fonts.icon_small, self.t.fg_dim);
-            g.text_in(&rect(tab.left + self.s(30), tab.top, tab.right - self.s(6), tab.bottom), &title, self.fonts.ui, self.t.fg_strong, DT_LINE);
-            if !desc.is_empty() && tab.right + self.s(12) < hd.right - self.s(220) {
-                g.text_in(&rect(tab.right + self.s(12), hd.top, hd.right - self.s(220), hd.bottom), &desc, self.fonts.small, self.t.fg_dim, DT_LINE);
+        let actions_left = self.paint_main_actions(g);
+        if self.tabs.is_empty() {
+            // a view without a tab (e.g. "Not a Git repository") still shows its title
+            let (title, _) = crate::tabs::view_title(&self.view);
+            if !title.is_empty() {
+                g.text_in(&rect(hd.left + self.s(12), hd.top, actions_left - self.s(8), hd.bottom), &title, self.fonts.ui, self.t.fg, DT_LINE);
             }
+        } else {
+            self.paint_tabs(g, rect(hd.left, hd.top, actions_left - self.s(8), hd.bottom));
         }
-        self.paint_main_actions(g);
         let body = l.main_body;
         let saved = g.clip(&body);
         match &self.view {
@@ -885,7 +1123,75 @@ impl App {
         self.draw_scrollbar(g, Area::Main);
     }
 
-    fn paint_main_actions(&mut self, g: &Gfx) {
+    /// Editor tab strip in `strip`. Tabs shrink when crowded; if they still don't fit, the
+    /// leading tabs are scrolled away so the active one stays visible.
+    fn paint_tabs(&mut self, g: &Gfx, strip: RECT) {
+        let n = self.tabs.len();
+        let avail = rw(&strip).max(0);
+        let (min_w, max_w) = (self.s(90), self.s(240));
+        let titles: Vec<(String, String, bool)> = (0..n)
+            .map(|i| {
+                let (t, d) = crate::tabs::view_title(self.tab_view(i));
+                (t, d, self.tabs[i].preview)
+            })
+            .collect();
+        let mut widths: Vec<i32> = titles.iter().map(|(t, _, p)| (g.text_w(t, if *p { self.fonts.ui_italic } else { self.fonts.ui }) + self.s(62)).clamp(min_w, max_w)).collect();
+        let total: i32 = widths.iter().sum();
+        if total > avail && total > 0 {
+            for w in widths.iter_mut() {
+                *w = (*w as i64 * avail as i64 / total as i64) as i32;
+                *w = (*w).max(min_w);
+            }
+        }
+        // first visible tab: scroll so the active tab fits
+        let mut first = 0;
+        while first < self.tab_active && widths[first..=self.tab_active].iter().sum::<i32>() > avail {
+            first += 1;
+        }
+        let saved = g.clip(&strip);
+        let main_focused = self.main_has_focus() && self.focus == Focus::Main;
+        let mut x = strip.left;
+        for i in first..n {
+            if x >= strip.right {
+                break;
+            }
+            let tr = rect(x, strip.top, x + widths[i], strip.bottom);
+            let active = i == self.tab_active;
+            let hovered = matches!(self.hover, Hit::Tab(t) | Hit::TabClose(t) if t == i);
+            g.fill(&tr, if active { self.t.editor } else if hovered { crate::theme::blend_colorref(self.t.sidebar, self.t.fg, 0.04) } else { self.t.sidebar });
+            if active {
+                g.hline(tr.left, tr.right, tr.top, if main_focused { self.t.accent } else { crate::theme::blend_colorref(self.t.accent, self.t.sidebar, 0.5) });
+            } else {
+                g.hline(tr.left, tr.right, tr.bottom - 1, self.t.border);
+            }
+            g.vline(tr.right - 1, tr.top, tr.bottom, self.t.border);
+            self.hits.push((tr, Hit::Tab(i)));
+            let (title, _desc, preview) = &titles[i];
+            let icon = match self.tab_view(i) {
+                MainView::Commit(_) => '\u{E8D4}',
+                _ => I_DOC,
+            };
+            g.icon(&xywh(tr.left + self.s(8), tr.top, self.s(18), rh(&tr)), icon, self.fonts.icon_small, self.t.fg_dim);
+            let fg = if active { self.t.fg_strong } else { self.t.fg_dim };
+            let font = if *preview { self.fonts.ui_italic } else { self.fonts.ui };
+            g.text_in(&rect(tr.left + self.s(30), tr.top, tr.right - self.s(30), tr.bottom), title, font, fg, DT_LINE);
+            // close button: always on the active tab, on hover for the others
+            if active || hovered {
+                let cr = xywh(tr.right - self.s(26), tr.top + (rh(&tr) - self.s(20)) / 2, self.s(20), self.s(20));
+                let hit = Hit::TabClose(i);
+                if self.hover == hit {
+                    g.round_rect(&cr, self.s(5), self.t.toolbar_hover, None);
+                }
+                g.icon(&cr, I_CLOSE, self.fonts.icon_small, fg);
+                self.hits.push((cr, hit));
+            }
+            x = tr.right;
+        }
+        g.unclip(saved);
+    }
+
+    /// Paints the active view's header actions, right aligned; returns their left edge.
+    fn paint_main_actions(&mut self, g: &Gfx) -> i32 {
         let hd = self.l.main_header;
         let bs = self.s(24);
         let y = hd.top + (rh(&hd) - bs) / 2;
@@ -926,7 +1232,9 @@ impl App {
         }
         if has_back {
             self.icon_button(g, xywh(x, y, bs, bs), I_BACK, Hit::DiffBack, true);
+            x -= bs + self.s(2);
         }
+        x + bs
     }
 
     fn paint_watermark(&mut self, g: &Gfx) {
@@ -1194,7 +1502,10 @@ impl App {
         let o = self.l.output;
         g.fill(&o, self.t.sidebar);
         g.hline(o.left, o.right, o.top, self.t.border);
-        self.hits.push((rect(o.left, o.top - self.s(2), o.right, o.top + self.s(3)), Hit::Sash(Sash::Output)));
+        let mode = self.panel_mode();
+        if matches!(mode, PanelMode::Normal | PanelMode::FullWidth) {
+            self.hits.push((rect(o.left, o.top - self.s(2), o.right, o.top + self.s(3)), Hit::Sash(Sash::Output)));
+        }
         let term_tab = self.st.panel_terminal;
         // tabs
         let mut x = o.left + self.s(12);
@@ -1214,6 +1525,11 @@ impl App {
         let y = o.top + (self.s(35) - bs) / 2;
         let mut rx = o.right - self.s(10) - bs;
         self.icon_button(g, xywh(rx, y, bs, bs), I_CLOSE, Hit::Cmd(if term_tab { Cmd::ToggleTerminal } else { Cmd::ToggleOutput }), true);
+        rx -= bs + self.s(2);
+        // maximize / restore (FullScreen / BackToWindow glyphs) and the size mode menu
+        self.icon_button(g, xywh(rx, y, bs, bs), if mode == PanelMode::Normal { '\u{E740}' } else { '\u{E73F}' }, Hit::Cmd(Cmd::TogglePanelMax), true);
+        rx -= bs + self.s(2);
+        self.icon_button(g, xywh(rx, y, bs, bs), I_MORE, Hit::PanelMenu, true);
         rx -= bs + self.s(2);
         if term_tab {
             self.icon_button(g, xywh(rx, y, bs, bs), '\u{E74D}', Hit::Cmd(Cmd::KillTerminal), true);
@@ -1516,8 +1832,20 @@ impl App {
                         Sash::Sidebar => self.st.sidebar_w = ((orig + delta) as f32 / self.scale) as i32,
                         Sash::Graph => {
                             let top = self.l.title.bottom;
-                            let h = (self.l.sidebar.bottom - top).max(1);
-                            self.st.graph_split = (((orig + delta) - top) as f32 / h as f32).clamp(0.15, 0.9);
+                            let flex = (self.l.branches_header.top - top - rh(&self.l.graph_header)).max(1);
+                            self.st.graph_split = (((orig + delta) - top) as f32 / flex as f32).clamp(0.05, 0.95);
+                        }
+                        Sash::Branches => {
+                            // the list grows upwards from the bottom of the side bar
+                            self.st.branches_h = ((orig - delta).max(0) as f32 / self.scale).max(44.0) as i32;
+                            if self.st.graph_open {
+                                // keep the Changes / Graph boundary where it is
+                                let top = self.l.title.bottom;
+                                let hdr = rh(&self.l.graph_header);
+                                let br = self.s(self.st.branches_h).min(self.l.sidebar.bottom - hdr * 2 - self.s(80) - (self.l.button.bottom + self.s(72)));
+                                let flex = (self.l.sidebar.bottom - br - hdr - top - hdr).max(1);
+                                self.st.graph_split = ((self.l.graph_header.top - top) as f32 / flex as f32).clamp(0.05, 0.95);
+                            }
                         }
                         Sash::Output => self.st.output_h = ((orig - delta) as f32 / self.scale) as i32,
                     }
@@ -1582,7 +1910,7 @@ impl App {
         if self.overlay.is_some() {
             return Some(Area::Pick);
         }
-        for a in [Area::Changes, Area::Graph, Area::Main, Area::Output] {
+        for a in [Area::Changes, Area::Branches, Area::Graph, Area::Main, Area::Output] {
             if a == Area::Output && !self.st.output_visible {
                 continue;
             }
@@ -1669,7 +1997,7 @@ impl App {
     fn open_row(&mut self, i: usize) {
         if let Some(CRow::File(fi)) = self.crows.get(i).copied() {
             let f = self.file(fi).cloned().unwrap();
-            self.load_change_view(f, false);
+            self.open_change(f, false);
         }
     }
 
@@ -1713,6 +2041,7 @@ impl App {
                 let orig = match s {
                     Sash::Sidebar => rw(&self.l.sidebar),
                     Sash::Graph => self.l.graph_header.top,
+                    Sash::Branches => rh(&self.l.branches),
                     Sash::Output => rh(&self.l.output),
                 };
                 self.drag = Some(Drag::Sash(s, if s == Sash::Sidebar { x } else { y }, orig));
@@ -1779,10 +2108,29 @@ impl App {
                 self.graph_sel = Some(i);
                 self.focus = Focus::Graph;
                 if let Some(c) = self.commits.get(i).cloned() {
-                    self.open_commit(c, None);
+                    self.open_commit(c, None, false);
                 }
             }
             Hit::GraphMore => self.load_log(true),
+            Hit::Tab(i) => {
+                self.focus = Focus::Main;
+                self.activate_tab(i);
+            }
+            Hit::TabClose(i) => self.close_tab(i),
+            Hit::BranchesHeader => self.toggle_branches_section(),
+            Hit::GraphHeader => self.toggle_graph_section(),
+            Hit::PanelMenu => {
+                let mut m = Menu::new();
+                let items = self.panel_size_menu(&mut m);
+                self.show_menu(x, y, items, m);
+            }
+            Hit::BranchRow(i) => {
+                if matches!(self.brows.get(i), Some(BRow::Group { .. })) {
+                    self.toggle_branch_group(i, None);
+                } else {
+                    self.select_branch_row(i);
+                }
+            }
             Hit::DiffRow(r) => {
                 self.focus = Focus::Main;
                 if let MainView::Diff(d) = &mut self.view {
@@ -1914,11 +2262,13 @@ impl App {
 
     pub fn on_dblclick(&mut self, x: i32, y: i32) {
         match self.hit_test(x, y) {
-            Hit::FileRow(i) => {
-                let files = self.selected_files(Some(i));
-                self.file_action(files, 3);
+            // like VS Code: the first click opened a preview tab, the double click keeps it open
+            Hit::FileRow(_) | Hit::GraphRow(_) | Hit::Tab(_) => self.pin_tab(self.tab_active),
+            Hit::CommitFile(i) => {
+                self.open_commit_file(i);
+                self.pin_tab(self.tab_active);
             }
-            Hit::CommitFile(i) => self.open_commit_file(i),
+            Hit::BranchRow(i) if matches!(self.brows.get(i), Some(BRow::Ref(_))) => self.branch_activate(i),
             Hit::TermBody => self.term_select_word(x, y),
             _ => {}
         }
@@ -2008,10 +2358,18 @@ impl App {
             m.check("Show Output", self.st.output_visible, |a| a.exec(Cmd::ToggleOutput)),
             m.check("Dark Theme", self.st.dark, |a| a.exec(Cmd::ToggleTheme)),
             m.cmd(if self.st.sidebar_right { "Move Primary Side Bar Left" } else { "Move Primary Side Bar Right" }, Cmd::ToggleSidebarPos),
+            m.cmd("Hide Primary Side Bar\tCtrl+B", Cmd::ToggleSidebar),
             m.cmd("Show All Commands...", Cmd::Palette),
         ];
         let _ = y;
         self.show_menu(x, self.l.title.bottom, items, m);
+    }
+
+    /// Middle click closes a tab.
+    pub fn on_mbutton_up(&mut self, x: i32, y: i32) {
+        if let Hit::Tab(i) | Hit::TabClose(i) = self.hit_test(x, y) {
+            self.close_tab(i);
+        }
     }
 
     pub fn on_rbutton_up(&mut self, x: i32, y: i32) {
@@ -2025,9 +2383,38 @@ impl App {
             return;
         }
         let mut m = Menu::new();
+        let o = self.l.output;
+        if self.st.output_visible && contains(&rect(o.left, o.top, o.right, o.top + self.s(35)), x, y) {
+            let items = self.panel_size_menu(&mut m);
+            self.show_menu(x, y, items, m);
+            return;
+        }
         // like VS Code: right-click the activity bar or the side bar title to move the side bar
         if contains(&self.l.activity, x, y) || contains(&self.l.title, x, y) {
-            let items = vec![m.cmd(if self.st.sidebar_right { "Move Primary Side Bar Left" } else { "Move Primary Side Bar Right" }, Cmd::ToggleSidebarPos)];
+            let items = vec![
+                m.cmd(if self.st.sidebar_right { "Move Primary Side Bar Left" } else { "Move Primary Side Bar Right" }, Cmd::ToggleSidebarPos),
+                m.cmd(if self.st.sidebar_visible { "Hide Primary Side Bar\tCtrl+B" } else { "Show Primary Side Bar\tCtrl+B" }, Cmd::ToggleSidebar),
+            ];
+            self.show_menu(x, y, items, m);
+            return;
+        }
+        if contains(&self.l.branches_header, x, y) || contains(&self.l.branches, x, y) {
+            if self.repo.is_none() {
+                return;
+            }
+            let i = match hit {
+                Hit::BranchRow(i) => {
+                    self.select_branch_row(i);
+                    i
+                }
+                _ => usize::MAX,
+            };
+            let items = self.branch_menu(i, &mut m);
+            self.show_menu(x, y, items, m);
+            return;
+        }
+        if let Hit::Tab(i) | Hit::TabClose(i) = hit {
+            let items = self.tab_menu(i, &mut m);
             self.show_menu(x, y, items, m);
             return;
         }
@@ -2051,7 +2438,7 @@ impl App {
                 let rel = first.path.clone();
                 let (f1, f2, f3, f4, f5) = (files.clone(), files.clone(), files.clone(), files.clone(), files.clone());
                 let mut v = vec![
-                    m.it_if("Open Changes", files.len() == 1, move |a| a.load_change_view(first, false)),
+                    m.it_if("Open Changes", files.len() == 1, move |a| a.open_change(first, true)),
                     m.it("Open File", move |a| a.file_action(f1, 3)),
                     MenuItem::Sep,
                 ];
@@ -2125,7 +2512,7 @@ impl App {
                 let (h1, h2, h3, h4, h5, h6) = (c.hash.clone(), c.hash.clone(), c.hash.clone(), c.hash.clone(), c.hash.clone(), c.hash.clone());
                 let msg = c.message.clone();
                 let c2 = c.clone();
-                let mut v = vec![m.it("Open Changes", move |a| a.open_commit(c2, None)), MenuItem::Sep];
+                let mut v = vec![m.it("Open Changes", move |a| a.open_commit(c2, None, true)), MenuItem::Sep];
                 for d in c.refs.iter().filter(|d| d.kind == RefKind::Head && Some(&d.name) != branch.as_ref()) {
                     let n = d.name.clone();
                     v.push(m.it(&format!("Checkout {}", d.name), move |a| a.checkout(format!("H:{n}"))));
@@ -2215,6 +2602,11 @@ impl App {
             (0x47, true, true) => Some(Cmd::FocusCommit),                    // Ctrl+Shift+G
             (0x43, true, true) => Some(Cmd::OpenTerminal),                   // Ctrl+Shift+C
             (0xC0, true, false) => Some(Cmd::ToggleTerminal),                // Ctrl+`
+            (0x4D, true, true) => Some(Cmd::TogglePanelMax),                 // Ctrl+Shift+M
+            (0x42, true, false) => Some(Cmd::ToggleSidebar),                 // Ctrl+B
+            (0x57, true, false) | (0x73, true, false) => Some(Cmd::CloseEditor), // Ctrl+W, Ctrl+F4
+            (0x09, true, false) | (0x22, true, false) => Some(Cmd::NextEditor), // Ctrl+Tab, Ctrl+PageDown
+            (0x09, true, true) | (0x21, true, false) => Some(Cmd::PrevEditor), // Ctrl+Shift+Tab, Ctrl+PageUp
             (0xC0, true, true) => Some(Cmd::NewTerminal),                    // Ctrl+Shift+`
             (0x76, false, false) => Some(Cmd::NextChange),                   // F7
             (0x76, false, true) => Some(Cmd::PrevChange),
@@ -2313,14 +2705,17 @@ impl App {
         match vk {
             0x09 => {
                 self.focus = match self.focus {
-                    Focus::Changes => Focus::Graph,
-                    Focus::Graph => Focus::Main,
+                    // visual order, skipping collapsed sections
+                    Focus::Changes if self.st.graph_open => Focus::Graph,
+                    Focus::Changes | Focus::Graph if self.st.branches_open => Focus::Branches,
+                    Focus::Changes | Focus::Graph | Focus::Branches => Focus::Main,
                     Focus::Main => Focus::Changes,
                     Focus::Terminal => Focus::Changes,
                 };
             }
             _ => match self.focus {
                 Focus::Changes => self.changes_key(vk, ctrl, shift),
+                Focus::Branches => self.branches_key(vk),
                 Focus::Graph => self.graph_key(vk),
                 Focus::Main => self.main_key(vk, ctrl),
                 Focus::Terminal => {}
@@ -2401,6 +2796,51 @@ impl App {
         }
     }
 
+    fn branches_key(&mut self, vk: u16) {
+        let n = self.brows.len();
+        if n == 0 || !self.st.branches_open {
+            return;
+        }
+        let cur = self.branch_sel_index().unwrap_or(0);
+        let next = match vk {
+            0x26 => Some(cur.saturating_sub(1)),
+            0x28 => Some(if self.branch_sel_index().is_none() { 0 } else { (cur + 1).min(n - 1) }),
+            0x24 => Some(0),
+            0x23 => Some(n - 1),
+            0x21 => Some(cur.saturating_sub(10)),
+            0x22 => Some((cur + 10).min(n - 1)),
+            _ => None,
+        };
+        if let Some(i) = next {
+            self.select_branch_row(i);
+            self.reveal_row(Area::Branches, i);
+            return;
+        }
+        match vk {
+            0x0D | 0x20 => self.branch_activate(cur),
+            // Left: collapse the group, or jump to it from one of its refs
+            0x25 => match self.brows.get(cur) {
+                Some(BRow::Group { .. }) => self.toggle_branch_group(cur, Some(false)),
+                Some(BRow::Ref(_)) => {
+                    if let Some(p) = (0..cur).rev().find(|&r| matches!(self.brows[r], BRow::Group { .. })) {
+                        self.select_branch_row(p);
+                        self.reveal_row(Area::Branches, p);
+                    }
+                }
+                None => {}
+            },
+            0x27 => self.toggle_branch_group(cur, Some(true)),
+            // F2: rename a local branch
+            0x71 => {
+                if let Some(rf) = self.branch_ref(cur).filter(|r| r.kind == RefKind::Head) {
+                    self.rename_branch_named(rf.name);
+                }
+            }
+            _ => {}
+        }
+        self.reveal_row(Area::Branches, self.branch_sel_index().unwrap_or(0));
+    }
+
     fn graph_key(&mut self, vk: u16) {
         let n = self.commits.len();
         if n == 0 {
@@ -2414,7 +2854,7 @@ impl App {
             0x23 => n - 1,
             0x0D => {
                 if let Some(c) = self.commits.get(cur).cloned() {
-                    self.open_commit(c, None);
+                    self.open_commit(c, None, true);
                 }
                 return;
             }

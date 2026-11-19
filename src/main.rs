@@ -5,11 +5,13 @@
 #![allow(dead_code)]
 
 mod app;
+mod branches;
 mod cli;
 mod diff;
 mod git;
 mod graph;
 mod settings;
+mod tabs;
 mod term;
 mod term_ui;
 mod theme;
@@ -276,6 +278,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             with_app(hwnd, |a| a.on_dblclick(lo(lp), hi(lp)));
             0
         }
+        WM_MBUTTONUP => {
+            with_app(hwnd, |a| a.on_mbutton_up(lo(lp), hi(lp)));
+            0
+        }
         WM_RBUTTONUP => {
             with_app(hwnd, |a| a.on_rbutton_up(lo(lp), hi(lp)));
             0
@@ -428,6 +434,27 @@ unsafe extern "system" fn overlay_edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
     DefSubclassProc(hwnd, msg, wp, lp)
 }
 
+/// Keeps a saved window rectangle on screen: moves it into the work area of the nearest
+/// monitor and shrinks it to fit, so a position saved on a monitor that is no longer
+/// connected (or at a different scale) doesn't open the window off-screen.
+fn fit_to_monitor(x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+    unsafe {
+        let r = RECT { left: x, top: y, right: x + w.max(1), bottom: y + h.max(1) };
+        let mon = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if mon.is_null() || GetMonitorInfoW(mon, &mut mi) == 0 {
+            return (CW_USEDEFAULT, CW_USEDEFAULT, 1280, 820);
+        }
+        let wa = mi.rcWork;
+        let w = w.clamp(400, (wa.right - wa.left).max(400));
+        let h = h.clamp(300, (wa.bottom - wa.top).max(300));
+        let x = x.clamp(wa.left, (wa.right - w).max(wa.left));
+        let y = y.clamp(wa.top, (wa.bottom - h).max(wa.top));
+        (x, y, w, h)
+    }
+}
+
 fn set_edit_fonts(a: &App) {
     unsafe {
         SendMessageW(a.commit_edit, WM_SETFONT, a.fonts.ui as WPARAM, 1);
@@ -505,7 +532,13 @@ fn main() {
         };
         RegisterClassExW(&wc);
         let st = settings::Settings::load();
-        let (x, y, w, h, max) = st.window.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT, 1280, 820, false));
+        let (x, y, w, h, max) = match st.window {
+            Some((x, y, w, h, max)) => {
+                let (x, y, w, h) = fit_to_monitor(x, y, w, h);
+                (x, y, w, h, max)
+            }
+            None => (CW_USEDEFAULT, CW_USEDEFAULT, 1280, 820, false),
+        };
         let title = win::wz("GitGui");
         let hwnd = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h, null_mut(), null_mut(), hinst, null());
         if hwnd.is_null() {

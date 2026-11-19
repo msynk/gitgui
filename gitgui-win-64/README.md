@@ -73,7 +73,8 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
   - **Stage / Unstage / Revert Block** buttons appear on hover.
   - Select lines (click, Shift+click or drag) and stage, unstage or revert just those lines. This uses `git apply --cached` with patches built per line.
 - **Merge conflicts:** conflicting files open with highlighted blocks and Accept Current / Incoming / Both links. You can also accept all of ours or all of theirs, then mark the file resolved.
-- **Graph:** commit graph drawn with VS Code's swimlane algorithm, with branch, upstream and tag badges. Auto/All filter and infinite scroll. Opening a commit shows its files, then each file's diff.
+- **Graph:** commit graph drawn with VS Code's swimlane algorithm, with branch, upstream and tag badges. Auto/All filter and infinite scroll. Click the GRAPH header to collapse or expand the section. Opening a commit shows its files, then each file's diff.
+- **Branches view:** a BRANCHES section below the Graph lists local branches (current one checked, with upstream and ahead/behind counts), remote branches grouped by remote, and tags. Groups collapse, the section collapses and resizes, and double-click or Enter checks out. Right-click a branch to checkout (or detached), create a branch or tag from it, merge it into the current branch, rebase onto it, push / publish, pull or fast-forward from its upstream, set or unset the upstream, rename (`F2`), delete or force delete, delete a remote branch, push or delete a tag, and copy its name or commit ID. Right-click a group to create branches or tags, fetch / prune / remove a remote, or collapse and expand all.
 - **Commit context menu:** checkout (detached or branch), create branch, create tag, cherry-pick, revert, merge, delete branch or tag, copy SHA or message.
 - **Branches and remotes:** checkout picker (branches / remote branches / tags, plus create new, create from, detached), with Stash & Checkout / Migrate / Force when local changes are in the way. Also create, rename, delete, merge, rebase, abort/continue, fetch (prune/all), pull (rebase), push (force with lease), push tags, sync, publish, add/remove remote.
 - **Stash:** stash, include untracked, staged only, apply, pop, drop, and view (as a commit).
@@ -85,8 +86,10 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
   - Mouse selection (double-click selects a word). `Ctrl+C` copies the selection, otherwise it sends ^C. `Ctrl+V` / `Shift+Insert` paste, and right-click copies or pastes like Windows Terminal.
   - Multiple terminals, like VS Code: `+` (or ``Ctrl+Shift+` ``) opens another one, and with two or more a tab list appears on the right of the panel (click to switch, trash icon to kill, right-click to rename or kill). `Ctrl+PageDown` / `Ctrl+PageUp` switch between them, and terminals in the background keep running.
   - Kill / clear / rename terminal. It is restored on startup if it was open, and pressing any key after the shell exits restarts it.
+  - Panel size: the maximize button in the panel header (or `Ctrl+Shift+M`) toggles between the normal size and a maximized mode, and the "..." button (or right-clicking the header) picks the mode: Normal, Full Width (spans under the side bar too), Full Height (fills the main area) or Full Screen (covers everything but the status bar). The last maximized mode is remembered.
   - Started lazily: no shell process exists until you open the terminal. With it open and idle the app still uses 0 ms CPU and about 2.7 MB of private memory; the shell's own memory is separate (cmd ~6 MB, bash ~8 MB, Windows PowerShell ~80 MB).
-- **Workbench:** command palette (`Ctrl+Shift+P`), quick pick and input overlays, dialogs, toasts with "Open Git Log", an Output panel with every git command, and a status bar showing branch, sync and in-progress state. Dark and light themes (the native title bar and popup menus follow the theme), a side bar that can sit on the left or the right (*View: Toggle Primary Side Bar Position*, or right-click the activity bar), per-monitor DPI, and a recent folders list.
+- **Editor tabs:** diffs, files and commits open in tabs, like VS Code. A single click opens a preview tab (italic title) that the next click replaces; double-clicking the file or commit, double-clicking the tab, or *Keep Open* pins it so it stays. Opening something that already has a tab switches to it. Close a tab with its × button, a middle click, `Ctrl+W` or `Ctrl+F4`; right-click a tab for Close, Close Others, Close to the Right, Close All, Keep Open and Copy Path. Background tabs of working tree changes are refreshed when you switch back to them.
+- **Workbench:** command palette (`Ctrl+Shift+P`), quick pick and input overlays, dialogs, toasts with "Open Git Log", an Output panel with every git command, and a status bar showing branch, sync and in-progress state. Dark and light themes (the native title bar and popup menus follow the theme), a side bar that can sit on the left or the right (*View: Toggle Primary Side Bar Position*, or right-click the activity bar) and can be hidden to give the diff more room (`Ctrl+B`, or click the Source Control icon in the activity bar), per-monitor DPI, and a recent folders list.
 
 ## Keyboard
 
@@ -97,16 +100,21 @@ the startup crash (`DrawTextW` reading past non NUL-terminated strings) was foun
 | `Ctrl+Shift+G` | Focus commit message |
 | `F5` | Refresh |
 | `F7` / `Shift+F7` | Next / previous change |
-| `Tab` | Cycle focus: Changes, Graph, Diff |
-| `↑ ↓ Enter Space` | Navigate and open in lists |
-| `← →` (changes tree) | Collapse / expand folder, or go to the parent folder |
+| `Tab` | Cycle focus: Changes, Graph, Branches, Diff |
+| `↑ ↓ Enter Space` | Navigate and open in lists (Enter on a branch checks it out) |
+| `← →` (changes tree, branches) | Collapse / expand folder or group, or go to the parent |
+| `F2` (branches) | Rename branch |
 | `S` / `U` (diff) | Stage / unstage selected lines |
 | `Ctrl+C` (diff) | Copy selected lines |
 | `Backspace` (diff) | Back to commit |
 | `Del` (changes) | Discard |
+| `Ctrl+B` | Toggle side bar |
+| `Ctrl+W` / `Ctrl+F4` | Close editor tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab`, `Ctrl+PageDown` / `Ctrl+PageUp` | Next / previous editor tab |
 | `Ctrl+O` / `Ctrl+R` / `Ctrl+Shift+N` | Open folder / recent / new window |
 | `Ctrl+J` | Toggle Output |
 | ``Ctrl+` `` | Toggle integrated terminal |
+| `Ctrl+Shift+M` | Toggle maximized panel |
 | ``Ctrl+Shift+` `` | New terminal |
 | `Ctrl+PageDown` / `Ctrl+PageUp` (terminal) | Next / previous terminal |
 | `Ctrl+Shift+C` | External terminal in repo |
@@ -119,11 +127,13 @@ Settings (theme, layout, side bar position, recent folders) are stored in `%APPD
 src/main.rs      window, message loop, re-entrancy-safe dispatch, edit subclasses
 src/app.rs       state, background jobs, all git commands
 src/ui.rs        layout, GDI painting, hit testing, mouse/keyboard, menus
+src/branches.rs  Branches view rows and branch actions / context menus
 src/git.rs       git process runner + porcelain/log/refs parsers
 src/diff.rs      unified diff parser, side-by-side rows, line-level patch builder, conflicts
 src/graph.rs     swimlane graph layout
 src/term.rs      ConPTY backend + VT/xterm emulator
 src/term_ui.rs   terminal panel: input, selection, painting
+src/tabs.rs      editor tabs (preview / pinned, open, switch, close)
 src/cli.rs       command line parsing / path resolution
 src/watch.rs     ReadDirectoryChangesW watcher
 src/win.rs       Win32/GDI helpers (fonts, drawing, menus, clipboard, dark mode)

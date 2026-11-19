@@ -413,16 +413,18 @@ pub struct RefInfo {
     pub name: String,
     pub sha: String,
     pub upstream: Option<String>,
+    /// Upstream tracking state, e.g. "ahead 1, behind 2" or "gone" (empty when in sync).
+    pub track: String,
     pub subject: String,
     pub date: i64,
 }
 
 pub fn refs(root: &Path) -> Vec<RefInfo> {
-    let o = run(root, &["for-each-ref", "--sort=-committerdate", "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream:short)%00%(committerdate:unix)%00%(subject)", "refs/heads", "refs/remotes", "refs/tags"], None, true);
+    let o = run(root, &["for-each-ref", "--sort=-committerdate", "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)", "refs/heads", "refs/remotes", "refs/tags"], None, true);
     let mut v = Vec::new();
     for line in o.text().lines() {
         let f: Vec<&str> = line.split('\0').collect();
-        if f.len() < 6 {
+        if f.len() < 7 {
             continue;
         }
         let (kind, name) = if let Some(n) = f[0].strip_prefix("refs/heads/") {
@@ -442,8 +444,9 @@ pub fn refs(root: &Path) -> Vec<RefInfo> {
             name: name.to_string(),
             sha: if f[2].is_empty() { f[1] } else { f[2] }.to_string(),
             upstream: if f[3].is_empty() { None } else { Some(f[3].to_string()) },
-            date: f[4].parse().unwrap_or(0),
-            subject: f[5].to_string(),
+            track: f[4].to_string(),
+            date: f[5].parse().unwrap_or(0),
+            subject: f[6].to_string(),
         });
     }
     v

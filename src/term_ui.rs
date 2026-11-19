@@ -408,6 +408,10 @@ impl App {
                 self.start_terminal(None);
                 return true;
             }
+            (0x4D, true, true) => {
+                self.toggle_panel_max();
+                return true;
+            }
             (0x22, true, false) => {
                 self.focus_next_terminal(1);
                 return true;

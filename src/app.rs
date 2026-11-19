@@ -136,6 +136,8 @@ pub struct DiffView {
     pub sel: Option<(usize, usize)>,
     pub back: Option<Box<MainView>>,
     pub max_cols: usize,
+    /// Rows were built for the inline (true) or side-by-side layout.
+    pub inline: bool,
 }
 
 pub struct FileView {
@@ -170,11 +172,13 @@ pub enum Area {
     Main = 2,
     Output = 3,
     Pick = 4,
+    Branches = 5,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Changes,
+    Branches,
     Graph,
     Main,
     Terminal,
@@ -219,7 +223,32 @@ pub struct Toast {
 pub enum Sash {
     Sidebar,
     Graph,
+    Branches,
     Output,
+}
+
+/// Size of the bottom panel (Output / Terminal).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelMode {
+    /// Below the main area, resizable.
+    Normal = 0,
+    /// Spans the whole window width, under the activity bar and side bar too.
+    FullWidth = 1,
+    /// Takes the whole main area height (VS Code's "Maximize Panel Size").
+    FullHeight = 2,
+    /// Covers everything except the status bar.
+    FullScreen = 3,
+}
+
+impl PanelMode {
+    pub fn from_u8(v: u8) -> PanelMode {
+        match v {
+            1 => PanelMode::FullWidth,
+            2 => PanelMode::FullHeight,
+            3 => PanelMode::FullScreen,
+            _ => PanelMode::Normal,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -239,6 +268,12 @@ pub enum Hit {
     ActionBtn,
     GraphRow(usize),
     GraphMore,
+    BranchRow(usize),
+    BranchesHeader,
+    GraphHeader,
+    PanelMenu,
+    Tab(usize),
+    TabClose(usize),
     DiffRow(usize),
     DiffBlock(usize, u8),
     DiffBack,
@@ -276,6 +311,8 @@ pub struct Layout {
     pub edit: RECT,
     pub button: RECT,
     pub changes: RECT,
+    pub branches_header: RECT,
+    pub branches: RECT,
     pub graph_header: RECT,
     pub graph: RECT,
     pub main: RECT,
@@ -289,7 +326,7 @@ pub struct Layout {
 impl Default for Layout {
     fn default() -> Self {
         let z = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        Layout { activity: z, sidebar: z, title: z, changes_header: z, edit: z, button: z, changes: z, graph_header: z, graph: z, main: z, main_header: z, main_body: z, output: z, output_body: z, status: z }
+        Layout { activity: z, sidebar: z, title: z, changes_header: z, edit: z, button: z, changes: z, branches_header: z, branches: z, graph_header: z, graph: z, main: z, main_header: z, main_body: z, output: z, output_body: z, status: z }
     }
 }
 
@@ -363,7 +400,21 @@ cmds! {
     SelectShell => "Terminal: Select Default Profile", "";
     ClearTerminal => "Terminal: Clear", "";
     ToggleOutput => "View: Toggle Output", "Ctrl+J";
+    CloseEditor => "View: Close Editor", "Ctrl+W";
+    CloseOtherEditors => "View: Close Other Editors", "";
+    CloseAllEditors => "View: Close All Editors", "";
+    KeepEditor => "View: Keep Editor", "";
+    NextEditor => "View: Open Next Editor", "Ctrl+Tab";
+    PrevEditor => "View: Open Previous Editor", "Ctrl+Shift+Tab";
+    TogglePanelMax => "View: Toggle Maximized Panel", "Ctrl+Shift+M";
+    PanelRestore => "View: Restore Panel Size", "";
+    PanelFullWidth => "View: Panel Full Width", "";
+    PanelFullHeight => "View: Panel Full Height", "";
+    PanelFullScreen => "View: Panel Full Screen", "";
+    ToggleGraphSection => "Source Control: Toggle Graph Section", "";
+    ToggleBranchesSection => "Source Control: Toggle Branches Section", "";
     ToggleTheme => "Preferences: Toggle Light/Dark Theme", "";
+    ToggleSidebar => "View: Toggle Primary Side Bar Visibility", "Ctrl+B";
     ToggleSidebarPos => "View: Toggle Primary Side Bar Position", "";
     ToggleTreeView => "Source Control: Toggle View as Tree / List", "";
     ToggleInline => "Diff: Toggle Inline View", "";
@@ -405,11 +456,20 @@ pub struct App {
     /// Collapsed tree folders: (group id, folder path).
     pub collapsed_dirs: HashSet<(u8, String)>,
     pub sel: HashSet<(u8, String)>,
+    /// Rows of the Branches view.
+    pub brows: Vec<crate::branches::BRow>,
+    /// Selected Branches row, by key (see `brow_key`).
+    pub branch_sel: Option<String>,
+    /// Collapsed Branches groups ("local", "remote:<name>", "tags").
+    pub collapsed_bgroups: HashSet<String>,
     pub focus_row: Option<usize>,
     pub anchor_row: Option<usize>,
-    pub scroll: [i32; 5],
+    pub scroll: [i32; 6],
     pub hscroll: i32,
     pub view: MainView,
+    /// Editor tabs; `view` holds the active tab's view.
+    pub tabs: Vec<crate::tabs::EditorTab>,
+    pub tab_active: usize,
     pub view_gen: u64,
     pub ops: Vec<String>,
     pub spin: u32,
@@ -512,9 +572,11 @@ impl App {
             sel: HashSet::new(),
             focus_row: None,
             anchor_row: None,
-            scroll: [0; 5],
+            scroll: [0; 6],
             hscroll: 0,
             view: MainView::Empty,
+            tabs: Vec::new(),
+            tab_active: 0,
             view_gen: 0,
             ops: Vec::new(),
             spin: 0,
@@ -532,6 +594,9 @@ impl App {
             edit_clip: None,
             l: Layout::default(),
             graph_sel: None,
+            brows: Vec::new(),
+            branch_sel: None,
+            collapsed_bgroups: ["tags".to_string()].into_iter().collect(),
             git_version: None,
             buf: (std::ptr::null_mut(), std::ptr::null_mut(), 0, 0),
             output_seen: 0,
@@ -606,6 +671,8 @@ impl App {
             let f = folder.display().to_string();
             self.repo = None;
             self.watcher = None;
+            self.tabs.clear();
+            self.tab_active = 0;
             self.view = MainView::Message("Not a Git repository".into(), format!("The folder '{f}' doesn't have a git repository. Use 'Git: Initialize Repository' to create one."));
             self.st.add_recent(&f);
             self.st.save();
@@ -626,8 +693,12 @@ impl App {
         self.log_key.clear();
         self.sel.clear();
         self.crows.clear();
-        self.scroll = [0; 5];
+        self.scroll = [0; 6];
+        self.brows.clear();
+        self.branch_sel = None;
         self.view = MainView::Empty;
+        self.tabs.clear();
+        self.tab_active = 0;
         win::set_text(self.commit_edit, "");
         self.refresh();
         self.update_title();
@@ -660,9 +731,10 @@ impl App {
                     self.sel.clear();
                     self.sel.insert((group_id(f.group), f.path.clone()));
                 }
-                self.load_change_view(f, false);
+                self.open_change(f, true);
             }
             None => {
+                self.open_tab(format!("msg:{rel}"), true);
                 self.view = MainView::Message(short_name(&rel).to_string(), format!("'{rel}' has no changes."));
                 self.invalidate();
             }
@@ -727,7 +799,15 @@ impl App {
                     self.rebuild_graph();
                 }
                 JobResult::View { gen, view, keep_scroll } => {
-                    if gen != self.view_gen {
+                    // route the result to the tab that asked for it (it may be in the background now)
+                    let Some(ti) = self.tabs.iter().position(|t| t.gen == gen) else { continue };
+                    if ti != self.tab_active {
+                        let t = &mut self.tabs[ti];
+                        if !keep_scroll {
+                            t.scroll = 0;
+                            t.hscroll = 0;
+                        }
+                        t.view = view;
                         continue;
                     }
                     if !keep_scroll {
@@ -797,6 +877,8 @@ impl App {
         repo.stashes = stashes;
         repo.loaded = true;
         self.rebuild_changes();
+        self.rebuild_branches();
+        self.clamp_scroll(Area::Branches);
         let r = self.repo.as_ref().unwrap();
         let mut key = format!("{:?}|{:?}|{:?}|{}", r.status.head, r.status.branch, r.status.upstream, self.st.graph_all);
         for rf in &r.refs {
@@ -1061,10 +1143,23 @@ impl App {
         format!("-U{}", if self.st.compact_diff { 3 } else { 100000 })
     }
 
+    /// Opens the diff of a change in a tab (a preview tab unless `pin`).
+    pub fn open_change(&mut self, f: FileChange, pin: bool) {
+        // an already open tab is just activated (and refreshed), keeping its scroll position
+        if self.open_tab(format!("change:{}:{}", group_id(f.group), f.path), pin) && matches!(self.view, MainView::Diff(_) | MainView::File(_)) {
+            return;
+        }
+        self.load_change_view(f, false);
+    }
+
     pub fn load_change_view(&mut self, f: FileChange, keep_scroll: bool) {
         let Some(root) = self.root() else { return };
+        if self.tabs.is_empty() {
+            self.open_tab(format!("change:{}:{}", group_id(f.group), f.path), false);
+        }
         self.view_gen += 1;
         let gen = self.view_gen;
+        self.mark_tab_gen(gen);
         if !keep_scroll {
             self.view = MainView::Loading(f.path.clone());
         }
@@ -1080,10 +1175,18 @@ impl App {
         self.invalidate();
     }
 
-    pub fn open_commit(&mut self, commit: Commit, stash: Option<usize>) {
+    pub fn open_commit(&mut self, commit: Commit, stash: Option<usize>, pin: bool) {
         let Some(root) = self.root() else { return };
+        let key = match stash {
+            Some(i) => format!("stash:{i}:{}", commit.hash),
+            None => format!("commit:{}", commit.hash),
+        };
+        if self.open_tab(key, pin) && !matches!(self.view, MainView::Loading(_) | MainView::Empty) {
+            return;
+        }
         self.view_gen += 1;
         let gen = self.view_gen;
+        self.mark_tab_gen(gen);
         self.view = MainView::Loading(commit.subject().to_string());
         let tx = self.tx.clone();
         let hwnd = self.hwnd as isize;
@@ -1109,6 +1212,7 @@ impl App {
         cv.sel = Some(index);
         self.view_gen += 1;
         let gen = self.view_gen;
+        self.mark_tab_gen(gen);
         let ctx = self.diff_context();
         let inline = self.st.inline_diff;
         let tx = self.tx.clone();
@@ -1157,6 +1261,7 @@ impl App {
             let (rows, blocks) = diff::build_rows(&d.fd, inline);
             d.rows = rows;
             d.blocks = blocks;
+            d.inline = inline;
             d.sel = None;
         }
     }
@@ -1846,7 +1951,7 @@ impl App {
         let r = format!("stash@{{{index}}}");
         let out = git::run(&root, &["log", "-1", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%B%x1e", &r], None, true);
         if let Some(c) = git::parse_log(&out.text()).into_iter().next() {
-            self.open_commit(c, Some(index));
+            self.open_commit(c, Some(index), true);
         }
     }
 
@@ -1999,7 +2104,7 @@ impl App {
     }
 
     pub fn exec(&mut self, c: Cmd) {
-        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::ToggleTheme | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::FocusNextTerminal | Cmd::FocusPrevTerminal | Cmd::RenameTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
+        let needs_repo = !matches!(c, Cmd::Palette | Cmd::OpenFolder | Cmd::OpenRecent | Cmd::NewWindow | Cmd::Clone | Cmd::Init | Cmd::ToggleOutput | Cmd::CloseEditor | Cmd::CloseOtherEditors | Cmd::CloseAllEditors | Cmd::KeepEditor | Cmd::NextEditor | Cmd::PrevEditor | Cmd::TogglePanelMax | Cmd::PanelRestore | Cmd::PanelFullWidth | Cmd::PanelFullHeight | Cmd::PanelFullScreen | Cmd::ToggleGraphSection | Cmd::ToggleBranchesSection | Cmd::ToggleTheme | Cmd::ToggleSidebar | Cmd::ToggleSidebarPos | Cmd::ToggleTreeView | Cmd::About | Cmd::ClearOutput | Cmd::ToggleInline | Cmd::ToggleCompact | Cmd::NextChange | Cmd::PrevChange | Cmd::ConfigureUser | Cmd::ToggleTerminal | Cmd::NewTerminal | Cmd::KillTerminal | Cmd::FocusNextTerminal | Cmd::FocusPrevTerminal | Cmd::RenameTerminal | Cmd::SelectShell | Cmd::ClearTerminal);
         if needs_repo && self.repo.is_none() {
             self.info("There are no available repositories. Open a folder first.");
             return;
@@ -2117,6 +2222,19 @@ impl App {
                 self.clamp_scroll(Area::Changes);
                 self.invalidate();
             }
+            Cmd::CloseEditor => self.close_active_tab(),
+            Cmd::CloseOtherEditors => self.close_other_tabs(self.tab_active),
+            Cmd::CloseAllEditors => self.close_all_tabs(),
+            Cmd::KeepEditor => self.pin_tab(self.tab_active),
+            Cmd::NextEditor => self.cycle_tab(1),
+            Cmd::PrevEditor => self.cycle_tab(-1),
+            Cmd::TogglePanelMax => self.toggle_panel_max(),
+            Cmd::PanelRestore => self.set_panel_mode(PanelMode::Normal),
+            Cmd::PanelFullWidth => self.set_panel_mode(PanelMode::FullWidth),
+            Cmd::PanelFullHeight => self.set_panel_mode(PanelMode::FullHeight),
+            Cmd::PanelFullScreen => self.set_panel_mode(PanelMode::FullScreen),
+            Cmd::ToggleGraphSection => self.toggle_graph_section(),
+            Cmd::ToggleBranchesSection => self.toggle_branches_section(),
             Cmd::ToggleSidebarPos => {
                 self.st.sidebar_right = !self.st.sidebar_right;
                 self.st.save();
@@ -2140,9 +2258,15 @@ impl App {
             }
             Cmd::NextChange => self.goto_change(1),
             Cmd::PrevChange => self.goto_change(-1),
-            Cmd::FocusCommit => unsafe {
-                windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(self.commit_edit);
-            },
+            Cmd::FocusCommit => {
+                if !self.st.sidebar_visible {
+                    self.set_sidebar_visible(true);
+                }
+                unsafe {
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(self.commit_edit);
+                }
+            }
+            Cmd::ToggleSidebar => self.set_sidebar_visible(!self.st.sidebar_visible),
             Cmd::ClearOutput => {
                 git::clear_log();
             }
@@ -2244,7 +2368,7 @@ pub fn diff_view_from(text: &str, f: &FileChange, kind: DiffKind, inline: bool, 
     }
     let (rows, blocks) = diff::build_rows(&fd, inline);
     let max_cols = fd.hunks.iter().flat_map(|h| h.lines.iter()).map(|l| l.text.chars().count() + l.text.matches('\t').count() * 3).max().unwrap_or(0);
-    MainView::Diff(DiffView { title: title.into(), desc: f.path.clone(), path: f.path.clone(), kind, change: Some(f.clone()), fd, rows, blocks, sel: None, back: None, max_cols })
+    MainView::Diff(DiffView { title: title.into(), desc: f.path.clone(), path: f.path.clone(), kind, change: Some(f.clone()), fd, rows, blocks, sel: None, back: None, max_cols, inline })
 }
 
 pub fn build_change_view(root: &Path, f: &FileChange, ctx: &str, inline: bool) -> MainView {
